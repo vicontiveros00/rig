@@ -31,7 +31,7 @@ func scratchPath() string {
 
 func New() pane.Pane {
 	ta := textarea.New()
-	ta.Placeholder = "Start typing notes here..."
+	ta.Placeholder = "start typing notes here..."
 	ta.ShowLineNumbers = true
 	ta.CharLimit = 0
 	ta.Focus()
@@ -49,7 +49,7 @@ func New() pane.Pane {
 	return p
 }
 
-func (p *Pane) Name() string      { return "Scratch" }
+func (p *Pane) Name() string      { return "scratch" }
 func (p *Pane) ShortHelp() string { return "persistent notepad" }
 
 func (p *Pane) SetSize(width, height int) {

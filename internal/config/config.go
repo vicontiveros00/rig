@@ -6,17 +6,20 @@ import (
 	"path/filepath"
 
 	"github.com/spf13/viper"
+	"go.yaml.in/yaml/v3"
 )
 
 type ProviderConfig struct {
-	Endpoint string `mapstructure:"endpoint"`
-	APIKey   string `mapstructure:"api_key"`
+	Endpoint string `mapstructure:"endpoint" yaml:"endpoint"`
+	APIKey   string `mapstructure:"api_key" yaml:"api_key"`
 }
 
 type Config struct {
-	DefaultProvider string                    `mapstructure:"default_provider"`
-	DefaultModel    string                    `mapstructure:"default_model"`
-	Providers       map[string]ProviderConfig `mapstructure:"providers"`
+	DefaultProvider  string                    `mapstructure:"default_provider" yaml:"default_provider"`
+	DefaultModel     string                    `mapstructure:"default_model" yaml:"default_model"`
+	Providers        map[string]ProviderConfig `mapstructure:"providers" yaml:"providers"`
+	DiscoveredModels map[string][]string       `mapstructure:"discovered_models" yaml:"discovered_models,omitempty"`
+	path             string
 }
 
 const defaultConfig = `# rig configuration
@@ -84,5 +87,17 @@ func Load() (*Config, error) {
 		}
 	}
 
+	cfg.path = cfgFile
 	return &cfg, nil
+}
+
+func (c *Config) Save() error {
+	data, err := yaml.Marshal(c)
+	if err != nil {
+		return fmt.Errorf("marshaling config: %w", err)
+	}
+	if err := os.WriteFile(c.path, data, 0o644); err != nil {
+		return fmt.Errorf("writing config: %w", err)
+	}
+	return nil
 }

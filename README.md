@@ -28,8 +28,8 @@ rig --model gpt-4o-mini      # override model
 
 | Key | Action |
 |---|---|
-| `Ctrl+→` / `Ctrl+L` | Next tab |
-| `Ctrl+←` / `Ctrl+H` | Previous tab |
+| `Tab` | Next tab |
+| `Shift+Tab` | Previous tab |
 | `Enter` | Send message (in Chat) |
 | `Alt+Enter` | Newline in input |
 | `Esc` | Cancel streaming |

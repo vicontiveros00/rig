@@ -12,6 +12,7 @@ import (
 	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/vicontiveros00/rig/internal/llm"
+	"github.com/vicontiveros00/rig/internal/messages"
 	"github.com/vicontiveros00/rig/internal/pane"
 )
 
@@ -49,7 +50,7 @@ type Pane struct {
 
 func New(provider llm.Provider, model string) pane.Pane {
 	ta := textarea.New()
-	ta.Placeholder = "Type a message... (Enter to send)"
+	ta.Placeholder = "type a message... (enter to send)"
 	ta.ShowLineNumbers = false
 	ta.SetHeight(3)
 	ta.Focus()
@@ -73,8 +74,8 @@ func New(provider llm.Provider, model string) pane.Pane {
 	}
 }
 
-func (p *Pane) Name() string      { return "Chat" }
-func (p *Pane) ShortHelp() string { return "talk to an LLM" }
+func (p *Pane) Name() string      { return "chat" }
+func (p *Pane) ShortHelp() string { return "talk to an llm" }
 
 func (p *Pane) SetSize(width, height int) {
 	p.width = width
@@ -113,6 +114,11 @@ func (p *Pane) Update(msg tea.Msg) (pane.Pane, tea.Cmd) {
 	var cmds []tea.Cmd
 
 	switch msg := msg.(type) {
+	case messages.ModelSelectedMsg:
+		p.provider = msg.Provider
+		p.model = msg.Model
+		return p, nil
+
 	case tea.KeyMsg:
 		if p.streaming {
 			if msg.String() == "esc" {
@@ -193,7 +199,7 @@ func (p *Pane) View() string {
 		status = p.spinner.View() + " streaming..."
 	}
 	if p.err != nil {
-		status = errStyle.Render(fmt.Sprintf("Error: %v", p.err))
+		status = errStyle.Render(fmt.Sprintf("error: %v", p.err))
 	}
 
 	var parts []string
@@ -211,10 +217,10 @@ func (p *Pane) updateViewportContent() {
 	for _, m := range p.messages {
 		switch m.Role {
 		case llm.RoleUser:
-			sb.WriteString(userStyle.Render("You") + "\n")
+			sb.WriteString(userStyle.Render("you") + "\n")
 			sb.WriteString(m.Content + "\n\n")
 		case llm.RoleAssistant:
-			sb.WriteString(assistantStyle.Render("Assistant") + "\n")
+			sb.WriteString(assistantStyle.Render("assistant") + "\n")
 			content := m.Content
 			if content == "" && p.streaming {
 				content = "..."

@@ -2,7 +2,6 @@ package llm
 
 import (
 	"context"
-	"fmt"
 
 	"github.com/vicontiveros00/rig/internal/config"
 )
@@ -34,11 +33,10 @@ type Provider interface {
 
 func NewProvider(name string, cfg config.ProviderConfig) (Provider, error) {
 	switch name {
-	case "openai":
-		return NewOpenAI(cfg), nil
 	case "ollama":
 		return NewOllama(cfg), nil
 	default:
-		return nil, fmt.Errorf("unknown provider: %s", name)
+		// All providers use the OpenAI-compatible API (openai, litellm, etc.)
+		return NewOpenAI(cfg), nil
 	}
 }

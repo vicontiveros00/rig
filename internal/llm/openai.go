@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net/http"
+	"time"
 
 	openai "github.com/sashabaranov/go-openai"
 	"github.com/vicontiveros00/rig/internal/config"
@@ -18,6 +20,7 @@ func NewOpenAI(cfg config.ProviderConfig) *OpenAIProvider {
 	if cfg.Endpoint != "" {
 		ocfg.BaseURL = cfg.Endpoint
 	}
+	ocfg.HTTPClient = &http.Client{Timeout: 30 * time.Second}
 	return &OpenAIProvider{client: openai.NewClientWithConfig(ocfg)}
 }
 

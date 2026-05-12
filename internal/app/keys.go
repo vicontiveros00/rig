@@ -12,12 +12,12 @@ type keyMap struct {
 
 var keys = keyMap{
 	NextTab: key.NewBinding(
-		key.WithKeys("ctrl+right", "ctrl+l"),
-		key.WithHelp("ctrl+→", "next tab"),
+		key.WithKeys("tab"),
+		key.WithHelp("tab", "next tab"),
 	),
 	PrevTab: key.NewBinding(
-		key.WithKeys("ctrl+left", "ctrl+h"),
-		key.WithHelp("ctrl+←", "prev tab"),
+		key.WithKeys("shift+tab"),
+		key.WithHelp("shift+tab", "prev tab"),
 	),
 	Quit: key.NewBinding(
 		key.WithKeys("ctrl+c"),

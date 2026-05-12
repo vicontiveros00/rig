@@ -13,13 +13,11 @@ func RenderStatusBar(model, provider string, width int) string {
 		lipgloss.NewStyle().Foreground(Fg).Render(model),
 	)
 
-	right := fmt.Sprintf("%s %s  %s %s  %s %s ",
-		HelpKey.Render("ctrl+←/→"),
+	right := fmt.Sprintf("%s %s  %s %s ",
+		HelpKey.Render("tab/shift+tab"),
 		HelpDesc.Render("switch tab"),
 		HelpKey.Render("ctrl+c"),
 		HelpDesc.Render("quit"),
-		HelpKey.Render("?"),
-		HelpDesc.Render("help"),
 	)
 
 	leftW := lipgloss.Width(left)
