@@ -7,13 +7,13 @@ import (
 )
 
 func RenderStatusBar(model, provider string, width int) string {
-	left := fmt.Sprintf(" %s  %s/%s",
+	left := fmt.Sprintf("%s  %s/%s",
 		HelpKey.Render("rig"),
 		Subtle.Render(provider),
 		lipgloss.NewStyle().Foreground(Fg).Render(model),
 	)
 
-	right := fmt.Sprintf("%s %s  %s %s ",
+	right := fmt.Sprintf("%s %s  %s %s",
 		HelpKey.Render("tab/shift+tab"),
 		HelpDesc.Render("switch tab"),
 		HelpKey.Render("ctrl+c"),
@@ -22,13 +22,17 @@ func RenderStatusBar(model, provider string, width int) string {
 
 	leftW := lipgloss.Width(left)
 	rightW := lipgloss.Width(right)
-	gap := width - leftW - rightW
+	// StatusBarStyle has Padding(0,1) which adds 2 chars total
+	innerWidth := width - 2
+	gap := innerWidth - leftW - rightW
 	if gap < 0 {
 		gap = 0
 	}
 
-	bar := StatusBarStyle.Width(width).Render(
-		fmt.Sprintf("%s%*s%s", left, gap, "", right),
-	)
-	return bar
+	content := fmt.Sprintf("%s%*s%s", left, gap, "", right)
+
+	return StatusBarStyle.
+		Width(width).
+		MaxWidth(width).
+		Render(content)
 }

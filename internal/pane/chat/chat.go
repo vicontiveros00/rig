@@ -61,7 +61,7 @@ func New(provider llm.Provider, model string) pane.Pane {
 	sp.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("#7C3AED"))
 
 	r, _ := glamour.NewTermRenderer(
-		glamour.WithAutoStyle(),
+		glamour.WithStylePath("dark"),
 		glamour.WithWordWrap(80),
 	)
 
@@ -92,16 +92,14 @@ func (p *Pane) SetSize(width, height int) {
 	p.viewport.Width = width
 	p.viewport.Height = vpHeight
 
-	if p.renderer != nil {
-		wrapWidth := width - 4
-		if wrapWidth < 40 {
-			wrapWidth = 40
-		}
-		p.renderer, _ = glamour.NewTermRenderer(
-			glamour.WithAutoStyle(),
-			glamour.WithWordWrap(wrapWidth),
-		)
+	wrapWidth := width - 4
+	if wrapWidth < 40 {
+		wrapWidth = 40
 	}
+	p.renderer, _ = glamour.NewTermRenderer(
+		glamour.WithStylePath("dark"),
+		glamour.WithWordWrap(wrapWidth),
+	)
 
 	p.updateViewportContent()
 }
@@ -220,7 +218,7 @@ func (p *Pane) updateViewportContent() {
 			sb.WriteString(userStyle.Render("you") + "\n")
 			sb.WriteString(m.Content + "\n\n")
 		case llm.RoleAssistant:
-			sb.WriteString(assistantStyle.Render("assistant") + "\n")
+			sb.WriteString(assistantStyle.Render("rigby") + "\n")
 			content := m.Content
 			if content == "" && p.streaming {
 				content = "..."
@@ -277,3 +275,4 @@ func (p *Pane) waitForChunk() tea.Cmd {
 		return streamChunkMsg{chunk: chunk}
 	}
 }
+
