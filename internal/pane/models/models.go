@@ -9,6 +9,7 @@ import (
 
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textinput"
+	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/vicontiveros00/rig/internal/config"
@@ -37,7 +38,6 @@ var (
 		Bold(true).
 		Render(" (active)")
 
-
 	errStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#EF4444")).
 			Italic(true)
@@ -65,6 +65,7 @@ type Pane struct {
 	cursor         int
 	filter         textinput.Model
 	filtering      bool
+	viewport       viewport.Model
 	spinner        spinner.Model
 	loading        int
 	activeProvider string
@@ -78,7 +79,6 @@ type Pane struct {
 func New(providers map[string]llm.Provider, cfg *config.Config, activeProvider, activeModel string) pane.Pane {
 	ti := textinput.New()
 	ti.Placeholder = "filter models..."
-
 	ti.CharLimit = 100
 
 	sp := spinner.New()
@@ -113,6 +113,9 @@ func (p *Pane) SetSize(width, height int) {
 	p.width = width
 	p.height = height
 	p.filter.Width = width - 4
+	p.viewport.Width = width
+	p.viewport.Height = height - 2
+	p.updateViewport()
 }
 
 func (p *Pane) Init() tea.Cmd {
@@ -137,6 +140,7 @@ func (p *Pane) Update(msg tea.Msg) (pane.Pane, tea.Cmd) {
 			p.lastRefresh = time.Now()
 			p.persistModels()
 		}
+		p.updateViewport()
 		return p, nil
 
 	case spinner.TickMsg:
@@ -156,6 +160,7 @@ func (p *Pane) Update(msg tea.Msg) (pane.Pane, tea.Cmd) {
 				p.filter.Blur()
 				p.rebuildFlat()
 				p.cursor = 0
+				p.updateViewport()
 				return p, nil
 			case "enter":
 				p.filtering = false
@@ -166,6 +171,7 @@ func (p *Pane) Update(msg tea.Msg) (pane.Pane, tea.Cmd) {
 				p.filter, cmd = p.filter.Update(msg)
 				p.rebuildFlat()
 				p.cursor = 0
+				p.updateViewport()
 				return p, cmd
 			}
 		}
@@ -181,18 +187,23 @@ func (p *Pane) Update(msg tea.Msg) (pane.Pane, tea.Cmd) {
 		case "up", "k":
 			if p.cursor > 0 {
 				p.cursor--
+				p.scrollToCursor()
 			}
+			p.updateViewport()
 			return p, nil
 		case "down", "j":
 			if p.cursor < len(p.flat)-1 {
 				p.cursor++
+				p.scrollToCursor()
 			}
+			p.updateViewport()
 			return p, nil
 		case "enter":
 			if p.cursor < len(p.flat) {
 				entry := p.flat[p.cursor]
 				p.activeProvider = entry.provider
 				p.activeModel = entry.model
+				p.updateViewport()
 				provider := p.providers[entry.provider]
 				return p, func() tea.Msg {
 					return messages.ModelSelectedMsg{
@@ -210,21 +221,37 @@ func (p *Pane) Update(msg tea.Msg) (pane.Pane, tea.Cmd) {
 }
 
 func (p *Pane) View() string {
+	var header string
+	if p.filtering {
+		header = "  " + p.filter.View()
+	} else if p.filter.Value() != "" {
+		header = "  " + hintStyle.Render(fmt.Sprintf("filter: %s", p.filter.Value()))
+	}
+	if p.loading > 0 {
+		if header != "" {
+			header += "\n"
+		}
+		header += "  " + p.spinner.View() + " discovering models..."
+	}
+
+	help := hintStyle.Render("↑/↓ navigate  enter select  r refresh  / filter  esc clear")
+	if !p.lastRefresh.IsZero() {
+		help += hintStyle.Render(fmt.Sprintf("  last refresh: %s", p.lastRefresh.Format("15:04:05")))
+	}
+
+	var parts []string
+	if header != "" {
+		parts = append(parts, header)
+	}
+	parts = append(parts, p.viewport.View())
+	parts = append(parts, help)
+
+	return lipgloss.JoinVertical(lipgloss.Left, parts...)
+}
+
+func (p *Pane) updateViewport() {
 	var sb strings.Builder
 
-	// Filter bar
-	if p.filtering {
-		sb.WriteString("  " + p.filter.View() + "\n\n")
-	} else if p.filter.Value() != "" {
-		sb.WriteString("  " + hintStyle.Render(fmt.Sprintf("filter: %s", p.filter.Value())) + "\n\n")
-	}
-
-	// Loading indicator
-	if p.loading > 0 {
-		sb.WriteString("  " + p.spinner.View() + " discovering models...\n\n")
-	}
-
-	// Model list grouped by provider
 	providerNames := p.sortedProviders()
 	idx := 0
 	for _, provName := range providerNames {
@@ -262,20 +289,39 @@ func (p *Pane) View() string {
 		sb.WriteString("\n")
 	}
 
-	// Help
-	help := hintStyle.Render("↑/↓ navigate  enter select  r refresh  / filter  esc clear")
-	if !p.lastRefresh.IsZero() {
-		help += hintStyle.Render(fmt.Sprintf("  last refresh: %s", p.lastRefresh.Format("15:04:05")))
-	}
+	p.viewport.SetContent(sb.String())
+}
 
-	content := sb.String()
-	contentLines := strings.Count(content, "\n")
-	if p.height-contentLines-2 > 0 {
-		content += strings.Repeat("\n", p.height-contentLines-2)
+func (p *Pane) scrollToCursor() {
+	// Each model is 1 line; count header lines before cursor to get the
+	// actual line number in the viewport content.
+	line := 0
+	providerNames := p.sortedProviders()
+	idx := 0
+	for _, provName := range providerNames {
+		line++ // provider header
+		for _, entry := range p.flat {
+			if entry.provider != provName {
+				continue
+			}
+			if idx == p.cursor {
+				goto found
+			}
+			idx++
+			line++
+		}
+		line++ // blank line between groups
 	}
-	content += "\n" + help
-
-	return content
+found:
+	vpHeight := p.viewport.Height
+	if vpHeight < 1 {
+		return
+	}
+	if line < p.viewport.YOffset {
+		p.viewport.SetYOffset(line)
+	} else if line >= p.viewport.YOffset+vpHeight {
+		p.viewport.SetYOffset(line - vpHeight + 1)
+	}
 }
 
 func (p *Pane) discoverAll() []tea.Cmd {

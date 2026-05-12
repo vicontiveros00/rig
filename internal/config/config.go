@@ -92,7 +92,20 @@ func Load() (*Config, error) {
 }
 
 func (c *Config) Save() error {
-	data, err := yaml.Marshal(c)
+	// Read the existing file and only update discovered_models,
+	// preserving user edits to everything else.
+	raw := make(map[string]any)
+
+	existing, err := os.ReadFile(c.path)
+	if err == nil {
+		yaml.Unmarshal(existing, &raw)
+	}
+
+	if c.DiscoveredModels != nil && len(c.DiscoveredModels) > 0 {
+		raw["discovered_models"] = c.DiscoveredModels
+	}
+
+	data, err := yaml.Marshal(raw)
 	if err != nil {
 		return fmt.Errorf("marshaling config: %w", err)
 	}
