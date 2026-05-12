@@ -4,11 +4,13 @@ import (
 	"fmt"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/vicontiveros00/rig/internal/version"
 )
 
 func RenderStatusBar(model, provider string, width int) string {
-	left := fmt.Sprintf("%s  %s/%s",
+	left := fmt.Sprintf("%s %s  %s/%s",
 		HelpKey.Render("rig"),
+		Subtle.Render(version.String()),
 		Subtle.Render(provider),
 		lipgloss.NewStyle().Foreground(Fg).Render(model),
 	)
