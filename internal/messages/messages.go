@@ -12,3 +12,8 @@ type ServersChangedMsg struct {
 	Providers  map[string]llm.Provider
 	MCPChanged bool
 }
+
+type ActivePlanChangedMsg struct {
+	PlanTitle string
+	PlanTasks string // markdown-formatted task list
+}

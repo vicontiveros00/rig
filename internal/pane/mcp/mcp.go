@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -657,10 +658,16 @@ func schemaProperties(schema map[string]any) [][2]string {
 	if !ok {
 		return nil
 	}
-	var result [][2]string
-	for name, v := range propsMap {
+	names := make([]string, 0, len(propsMap))
+	for name := range propsMap {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	result := make([][2]string, 0, len(names))
+	for _, name := range names {
 		typ := "string"
-		if propMap, ok := v.(map[string]any); ok {
+		if propMap, ok := propsMap[name].(map[string]any); ok {
 			if t, ok := propMap["type"].(string); ok {
 				typ = t
 			}

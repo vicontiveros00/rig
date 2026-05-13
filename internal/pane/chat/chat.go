@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textarea"
@@ -11,6 +12,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/vicontiveros00/rig/internal/history"
 	"github.com/vicontiveros00/rig/internal/llm"
 	"github.com/vicontiveros00/rig/internal/messages"
 	"github.com/vicontiveros00/rig/internal/pane"
@@ -30,6 +32,9 @@ var (
 	errStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#EF4444")).
 			Bold(true)
+
+	hintStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#6B7280"))
 )
 
 type Pane struct {
@@ -39,6 +44,7 @@ type Pane struct {
 	spinner   spinner.Model
 	provider  llm.Provider
 	model     string
+	providerName string
 	streaming bool
 	width     int
 	height    int
@@ -46,6 +52,16 @@ type Pane struct {
 	cancel    context.CancelFunc
 	streamCh  <-chan llm.StreamChunk
 	err       error
+
+	sessionID  string
+	createdAt  time.Time
+
+	activePlanTitle string
+	activePlanTasks string
+
+	pickerOpen  bool
+	pickerItems []history.ChatMeta
+	pickerIdx   int
 }
 
 func New(provider llm.Provider, model string) pane.Pane {
@@ -66,11 +82,13 @@ func New(provider llm.Provider, model string) pane.Pane {
 	)
 
 	return &Pane{
-		input:    ta,
-		spinner:  sp,
-		provider: provider,
-		model:    model,
-		renderer: r,
+		input:     ta,
+		spinner:   sp,
+		provider:  provider,
+		model:     model,
+		renderer:  r,
+		sessionID: history.GenerateChatID(model),
+		createdAt: time.Now(),
 	}
 }
 
@@ -115,9 +133,37 @@ func (p *Pane) Update(msg tea.Msg) (pane.Pane, tea.Cmd) {
 	case messages.ModelSelectedMsg:
 		p.provider = msg.Provider
 		p.model = msg.Model
+		p.providerName = msg.ProviderName
+		return p, nil
+
+	case messages.ActivePlanChangedMsg:
+		p.activePlanTitle = msg.PlanTitle
+		p.activePlanTasks = msg.PlanTasks
+		return p, nil
+
+	case chatListLoadedMsg:
+		p.pickerItems = msg.metas
+		p.pickerIdx = 0
+		p.pickerOpen = true
+		return p, nil
+
+	case chatSessionLoadedMsg:
+		if msg.err == nil {
+			p.sessionID = msg.session.ID
+			p.createdAt = msg.session.CreatedAt
+			p.messages = nil
+			for _, r := range msg.session.Messages {
+				p.messages = append(p.messages, fromRecord(r))
+			}
+			p.updateViewportContent()
+		}
 		return p, nil
 
 	case tea.KeyMsg:
+		if p.pickerOpen {
+			return p.updatePicker(msg)
+		}
+
 		if p.streaming {
 			if msg.String() == "esc" {
 				if p.cancel != nil {
@@ -129,10 +175,17 @@ func (p *Pane) Update(msg tea.Msg) (pane.Pane, tea.Cmd) {
 			return p, nil
 		}
 
+		switch msg.String() {
+		case "ctrl+n":
+			p.newSession()
+			return p, nil
+		case "ctrl+o":
+			return p, p.openPicker()
+		}
+
 		switch msg.Type {
 		case tea.KeyEnter:
 			if msg.Alt {
-				// Alt+Enter inserts newline
 				break
 			}
 			text := strings.TrimSpace(p.input.Value())
@@ -153,11 +206,13 @@ func (p *Pane) Update(msg tea.Msg) (pane.Pane, tea.Cmd) {
 			p.err = msg.chunk.Error
 			p.streaming = false
 			p.updateViewportContent()
+			p.autoSave()
 			return p, nil
 		}
 		if msg.chunk.Done {
 			p.streaming = false
 			p.updateViewportContent()
+			p.autoSave()
 			return p, nil
 		}
 		if len(p.messages) > 0 {
@@ -175,7 +230,7 @@ func (p *Pane) Update(msg tea.Msg) (pane.Pane, tea.Cmd) {
 		}
 	}
 
-	if !p.streaming {
+	if !p.streaming && !p.pickerOpen {
 		var cmd tea.Cmd
 		p.input, cmd = p.input.Update(msg)
 		cmds = append(cmds, cmd)
@@ -189,6 +244,10 @@ func (p *Pane) Update(msg tea.Msg) (pane.Pane, tea.Cmd) {
 }
 
 func (p *Pane) View() string {
+	if p.pickerOpen {
+		return p.viewPicker()
+	}
+
 	vpView := p.viewport.View()
 	inputView := p.input.View()
 
@@ -200,12 +259,15 @@ func (p *Pane) View() string {
 		status = errStyle.Render(fmt.Sprintf("error: %v", p.err))
 	}
 
+	help := hintStyle.Render("ctrl+n new chat  ctrl+o history")
+
 	var parts []string
 	parts = append(parts, vpView)
 	if status != "" {
 		parts = append(parts, status)
 	}
 	parts = append(parts, inputView)
+	parts = append(parts, help)
 
 	return lipgloss.JoinVertical(lipgloss.Left, parts...)
 }
@@ -236,10 +298,25 @@ func (p *Pane) updateViewportContent() {
 	p.viewport.GotoBottom()
 }
 
+var systemPrompt = `You are Rigby, a helpful assistant running inside rig — a multi-pane terminal UI crafted by Vic. You live in the chat pane alongside scratch, plan, build, git, mcp, models, and servers panes.
+
+Keep responses concise and well-formatted in markdown. You can use code blocks, lists, and headings. The user sees your output rendered with glamour in a terminal viewport.
+
+When the user asks about rig itself, you know it is a Go TUI built on Charm's Bubble Tea framework, configured via ~/.rig/config.yaml, and supports multiple LLM providers (OpenAI-compatible, Ollama, Anthropic) and MCP servers.`
+
+func (p *Pane) buildSystemPrompt() string {
+	prompt := systemPrompt
+	if p.activePlanTasks != "" {
+		prompt += fmt.Sprintf("\n\n## Active Plan\nThe user is currently working on: %q\n\n%s", p.activePlanTitle, p.activePlanTasks)
+	}
+	return prompt
+}
+
 func (p *Pane) startStream() tea.Cmd {
-	msgs := make([]llm.Message, len(p.messages)-1)
+	msgs := make([]llm.Message, 0, len(p.messages))
+	msgs = append(msgs, llm.Message{Role: llm.RoleSystem, Content: p.buildSystemPrompt()})
 	for i := 0; i < len(p.messages)-1; i++ {
-		msgs[i] = p.messages[i].ToLLM()
+		msgs = append(msgs, p.messages[i].ToLLM())
 	}
 
 	provider := p.provider
@@ -276,3 +353,122 @@ func (p *Pane) waitForChunk() tea.Cmd {
 	}
 }
 
+func (p *Pane) autoSave() {
+	if len(p.messages) == 0 {
+		return
+	}
+
+	records := make([]history.MessageRecord, len(p.messages))
+	for i, m := range p.messages {
+		records[i] = m.ToRecord()
+	}
+
+	session := history.ChatSession{
+		ID:        p.sessionID,
+		Provider:  p.providerName,
+		Model:     p.model,
+		CreatedAt: p.createdAt,
+		UpdatedAt: time.Now(),
+		Messages:  records,
+	}
+	_ = history.SaveChat(session)
+}
+
+func (p *Pane) newSession() {
+	p.autoSave()
+	p.messages = nil
+	p.sessionID = history.GenerateChatID(p.model)
+	p.createdAt = time.Now()
+	p.err = nil
+	p.updateViewportContent()
+}
+
+func (p *Pane) openPicker() tea.Cmd {
+	return func() tea.Msg {
+		metas, _ := history.ListChats()
+		return chatListLoadedMsg{metas: metas}
+	}
+}
+
+type chatListLoadedMsg struct {
+	metas []history.ChatMeta
+}
+
+func (p *Pane) updatePicker(msg tea.KeyMsg) (pane.Pane, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		p.pickerOpen = false
+		return p, nil
+	case "up", "k":
+		if p.pickerIdx > 0 {
+			p.pickerIdx--
+		}
+	case "down", "j":
+		if p.pickerIdx < len(p.pickerItems)-1 {
+			p.pickerIdx++
+		}
+	case "enter":
+		if len(p.pickerItems) > 0 {
+			meta := p.pickerItems[p.pickerIdx]
+			p.pickerOpen = false
+			return p, p.loadSession(meta.ID)
+		}
+	}
+	return p, nil
+}
+
+type chatSessionLoadedMsg struct {
+	session history.ChatSession
+	err     error
+}
+
+func (p *Pane) loadSession(id string) tea.Cmd {
+	return func() tea.Msg {
+		session, err := history.LoadChat(id)
+		return chatSessionLoadedMsg{session: session, err: err}
+	}
+}
+
+func (p *Pane) viewPicker() string {
+	var b strings.Builder
+
+	headerStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#8B5CF6"))
+	b.WriteString(headerStyle.Render("  recent conversations"))
+	b.WriteString("\n\n")
+
+	if len(p.pickerItems) == 0 {
+		dim := lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280"))
+		b.WriteString(dim.Render("  no saved conversations"))
+		b.WriteString("\n")
+	}
+
+	for i, meta := range p.pickerItems {
+		ts := meta.CreatedAt.Format("2006-01-02 15:04")
+		modelStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#10B981"))
+		previewStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280"))
+
+		line := fmt.Sprintf("  %s  %s", ts, modelStyle.Render(meta.Model))
+		preview := fmt.Sprintf("    %s", previewStyle.Render(fmt.Sprintf("%q", meta.Preview)))
+
+		if i == p.pickerIdx {
+			line = lipgloss.NewStyle().
+				Background(lipgloss.Color("#1E1B4B")).
+				Width(p.width - 2).
+				Render("> " + line[2:])
+			preview = lipgloss.NewStyle().
+				Background(lipgloss.Color("#1E1B4B")).
+				Width(p.width - 2).
+				Render(preview)
+		}
+
+		b.WriteString(line)
+		b.WriteString("\n")
+		b.WriteString(preview)
+		b.WriteString("\n\n")
+	}
+
+	help := lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280"))
+	b.WriteString(help.Render("  ↑/↓ navigate  enter = load  esc = cancel"))
+
+	return b.String()
+}

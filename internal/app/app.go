@@ -71,6 +71,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, tea.Batch(cmds...)
 
+	case messages.ActivePlanChangedMsg:
+		var cmds []tea.Cmd
+		for i, p := range m.panes {
+			updated, cmd := p.Update(msg)
+			m.panes[i] = updated
+			if cmd != nil {
+				cmds = append(cmds, cmd)
+			}
+		}
+		return m, tea.Batch(cmds...)
+
 	case tea.KeyMsg:
 		switch {
 		case key.Matches(msg, keys.Quit):
