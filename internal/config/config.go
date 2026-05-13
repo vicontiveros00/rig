@@ -88,29 +88,39 @@ func Load() (*Config, error) {
 	}
 
 	cfg.path = cfgFile
+	cfg.LoadModelsCache()
 	return &cfg, nil
 }
 
 func (c *Config) Save() error {
-	// Read the existing file and only update discovered_models,
-	// preserving user edits to everything else.
-	raw := make(map[string]any)
+	// Write discovered models to a separate cache file so we never
+	// touch the user's config.yaml.
+	cacheFile := filepath.Join(filepath.Dir(c.path), "models_cache.yaml")
 
-	existing, err := os.ReadFile(c.path)
-	if err == nil {
-		yaml.Unmarshal(existing, &raw)
-	}
+	cache := struct {
+		DiscoveredModels map[string][]string `yaml:"discovered_models"`
+	}{DiscoveredModels: c.DiscoveredModels}
 
-	if c.DiscoveredModels != nil && len(c.DiscoveredModels) > 0 {
-		raw["discovered_models"] = c.DiscoveredModels
-	}
-
-	data, err := yaml.Marshal(raw)
+	data, err := yaml.Marshal(&cache)
 	if err != nil {
-		return fmt.Errorf("marshaling config: %w", err)
+		return fmt.Errorf("marshaling models cache: %w", err)
 	}
-	if err := os.WriteFile(c.path, data, 0o644); err != nil {
-		return fmt.Errorf("writing config: %w", err)
+	if err := os.WriteFile(cacheFile, data, 0o644); err != nil {
+		return fmt.Errorf("writing models cache: %w", err)
 	}
 	return nil
+}
+
+func (c *Config) LoadModelsCache() {
+	cacheFile := filepath.Join(filepath.Dir(c.path), "models_cache.yaml")
+	data, err := os.ReadFile(cacheFile)
+	if err != nil {
+		return
+	}
+	var cache struct {
+		DiscoveredModels map[string][]string `yaml:"discovered_models"`
+	}
+	if err := yaml.Unmarshal(data, &cache); err == nil && cache.DiscoveredModels != nil {
+		c.DiscoveredModels = cache.DiscoveredModels
+	}
 }
