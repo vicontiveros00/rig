@@ -50,7 +50,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case messages.ModelSelectedMsg:
 		m.provider = msg.ProviderName
 		m.model = msg.Model
-		// Forward to all panes so chat can pick it up
+		var cmds []tea.Cmd
+		for i, p := range m.panes {
+			updated, cmd := p.Update(msg)
+			m.panes[i] = updated
+			if cmd != nil {
+				cmds = append(cmds, cmd)
+			}
+		}
+		return m, tea.Batch(cmds...)
+
+	case messages.ServersChangedMsg:
 		var cmds []tea.Cmd
 		for i, p := range m.panes {
 			updated, cmd := p.Update(msg)

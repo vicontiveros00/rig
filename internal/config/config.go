@@ -12,13 +12,22 @@ import (
 type ProviderConfig struct {
 	Endpoint string `mapstructure:"endpoint" yaml:"endpoint"`
 	APIKey   string `mapstructure:"api_key" yaml:"api_key"`
+	Type     string `mapstructure:"type" yaml:"type,omitempty"` // "cloud" or "local"
+}
+
+type MCPServerConfig struct {
+	Endpoint  string `mapstructure:"endpoint" yaml:"endpoint"`
+	APIKey    string `mapstructure:"api_key" yaml:"api_key"`
+	Transport string `mapstructure:"transport" yaml:"transport"` // "sse" or "stdio"
+	Autostart bool   `mapstructure:"autostart" yaml:"autostart"`
 }
 
 type Config struct {
-	DefaultProvider  string                    `mapstructure:"default_provider" yaml:"default_provider"`
-	DefaultModel     string                    `mapstructure:"default_model" yaml:"default_model"`
-	Providers        map[string]ProviderConfig `mapstructure:"providers" yaml:"providers"`
-	DiscoveredModels map[string][]string       `mapstructure:"discovered_models" yaml:"discovered_models,omitempty"`
+	DefaultProvider  string                      `mapstructure:"default_provider" yaml:"default_provider"`
+	DefaultModel     string                      `mapstructure:"default_model" yaml:"default_model"`
+	Providers        map[string]ProviderConfig   `mapstructure:"providers" yaml:"providers"`
+	MCPServers       map[string]MCPServerConfig  `mapstructure:"mcp_servers" yaml:"mcp_servers,omitempty"`
+	DiscoveredModels map[string][]string         `mapstructure:"discovered_models" yaml:"discovered_models,omitempty"`
 	path             string
 }
 
@@ -124,3 +133,28 @@ func (c *Config) LoadModelsCache() {
 		c.DiscoveredModels = cache.DiscoveredModels
 	}
 }
+
+func (c *Config) SaveConfig() error {
+	out := struct {
+		DefaultProvider string                     `yaml:"default_provider"`
+		DefaultModel    string                     `yaml:"default_model"`
+		Providers       map[string]ProviderConfig  `yaml:"providers"`
+		MCPServers      map[string]MCPServerConfig `yaml:"mcp_servers,omitempty"`
+	}{
+		DefaultProvider: c.DefaultProvider,
+		DefaultModel:    c.DefaultModel,
+		Providers:       c.Providers,
+		MCPServers:      c.MCPServers,
+	}
+
+	data, err := yaml.Marshal(&out)
+	if err != nil {
+		return fmt.Errorf("marshaling config: %w", err)
+	}
+	if err := os.WriteFile(c.path, data, 0o644); err != nil {
+		return fmt.Errorf("writing config: %w", err)
+	}
+	return nil
+}
+
+func (c *Config) Path() string { return c.path }
