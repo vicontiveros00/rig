@@ -1,7 +1,6 @@
 package chat
 
 import (
-	"context"
 	"fmt"
 	"strings"
 	"time"
@@ -12,23 +11,14 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/vicontiveros00/rig/internal/chatcore"
 	"github.com/vicontiveros00/rig/internal/history"
 	"github.com/vicontiveros00/rig/internal/llm"
 	"github.com/vicontiveros00/rig/internal/messages"
 	"github.com/vicontiveros00/rig/internal/pane"
 )
 
-type streamChunkMsg struct{ chunk llm.StreamChunk }
-
 var (
-	userStyle = lipgloss.NewStyle().
-			Bold(true).
-			Foreground(lipgloss.Color("#7C3AED"))
-
-	assistantStyle = lipgloss.NewStyle().
-			Bold(true).
-			Foreground(lipgloss.Color("#10B981"))
-
 	errStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#EF4444")).
 			Bold(true)
@@ -38,23 +28,18 @@ var (
 )
 
 type Pane struct {
-	messages  []Message
-	input     textarea.Model
-	viewport  viewport.Model
-	spinner   spinner.Model
-	provider  llm.Provider
-	model     string
-	providerName string
-	streaming bool
-	width     int
-	height    int
-	renderer  *glamour.TermRenderer
-	cancel    context.CancelFunc
-	streamCh  <-chan llm.StreamChunk
-	err       error
+	engine   chatcore.Engine
+	input    textarea.Model
+	viewport viewport.Model
+	spinner  spinner.Model
+	width    int
+	height   int
+	renderer *glamour.TermRenderer
+	err      error
 
-	sessionID  string
-	createdAt  time.Time
+	providerName string
+	sessionID    string
+	createdAt    time.Time
 
 	activePlanTitle string
 	activePlanTasks string
@@ -62,6 +47,7 @@ type Pane struct {
 	pickerOpen  bool
 	pickerItems []history.ChatMeta
 	pickerIdx   int
+	pickerVP    viewport.Model
 }
 
 func New(provider llm.Provider, model string) pane.Pane {
@@ -82,10 +68,9 @@ func New(provider llm.Provider, model string) pane.Pane {
 	)
 
 	return &Pane{
+		engine:    chatcore.Engine{Provider: provider, Model: model},
 		input:     ta,
 		spinner:   sp,
-		provider:  provider,
-		model:     model,
 		renderer:  r,
 		sessionID: history.GenerateChatID(model),
 		createdAt: time.Now(),
@@ -119,6 +104,13 @@ func (p *Pane) SetSize(width, height int) {
 		glamour.WithWordWrap(wrapWidth),
 	)
 
+	pickerH := height - 4
+	if pickerH < 1 {
+		pickerH = 1
+	}
+	p.pickerVP.Width = width
+	p.pickerVP.Height = pickerH
+
 	p.updateViewportContent()
 }
 
@@ -131,8 +123,7 @@ func (p *Pane) Update(msg tea.Msg) (pane.Pane, tea.Cmd) {
 
 	switch msg := msg.(type) {
 	case messages.ModelSelectedMsg:
-		p.provider = msg.Provider
-		p.model = msg.Model
+		p.engine.SetProvider(msg.Provider, msg.Model)
 		p.providerName = msg.ProviderName
 		return p, nil
 
@@ -151,9 +142,10 @@ func (p *Pane) Update(msg tea.Msg) (pane.Pane, tea.Cmd) {
 		if msg.err == nil {
 			p.sessionID = msg.session.ID
 			p.createdAt = msg.session.CreatedAt
-			p.messages = nil
+			p.engine.Messages = nil
 			for _, r := range msg.session.Messages {
-				p.messages = append(p.messages, fromRecord(r))
+				m := fromRecord(r)
+				p.engine.Messages = append(p.engine.Messages, chatcore.Message{Role: m.Role, Content: m.Content})
 			}
 			p.updateViewportContent()
 		}
@@ -164,12 +156,9 @@ func (p *Pane) Update(msg tea.Msg) (pane.Pane, tea.Cmd) {
 			return p.updatePicker(msg)
 		}
 
-		if p.streaming {
+		if p.engine.Streaming {
 			if msg.String() == "esc" {
-				if p.cancel != nil {
-					p.cancel()
-				}
-				p.streaming = false
+				p.engine.CancelStream()
 				return p, nil
 			}
 			return p, nil
@@ -193,44 +182,33 @@ func (p *Pane) Update(msg tea.Msg) (pane.Pane, tea.Cmd) {
 				return p, nil
 			}
 			p.input.Reset()
-			p.messages = append(p.messages, userMsg(text))
-			p.messages = append(p.messages, assistantMsg())
-			p.streaming = true
+			p.engine.SendUser(text)
 			p.err = nil
 			p.updateViewportContent()
-			return p, tea.Batch(p.startStream(), p.spinner.Tick)
+			return p, tea.Batch(p.engine.StartStream(p.buildSystemPrompt()), p.spinner.Tick)
 		}
 
-	case streamChunkMsg:
-		if msg.chunk.Error != nil {
-			p.err = msg.chunk.Error
-			p.streaming = false
-			p.updateViewportContent()
-			p.autoSave()
-			return p, nil
-		}
-		if msg.chunk.Done {
-			p.streaming = false
-			p.updateViewportContent()
-			p.autoSave()
-			return p, nil
-		}
-		if len(p.messages) > 0 {
-			last := &p.messages[len(p.messages)-1]
-			last.Content += msg.chunk.Content
+	case chatcore.ChunkMsg:
+		done := p.engine.HandleChunk(msg.Chunk)
+		if msg.Chunk.Error != nil {
+			p.err = msg.Chunk.Error
 		}
 		p.updateViewportContent()
-		return p, p.waitForChunk()
+		if done {
+			p.autoSave()
+			return p, nil
+		}
+		return p, p.engine.WaitForChunk()
 
 	case spinner.TickMsg:
-		if p.streaming {
+		if p.engine.Streaming {
 			var cmd tea.Cmd
 			p.spinner, cmd = p.spinner.Update(msg)
 			cmds = append(cmds, cmd)
 		}
 	}
 
-	if !p.streaming && !p.pickerOpen {
+	if !p.engine.Streaming && !p.pickerOpen {
 		var cmd tea.Cmd
 		p.input, cmd = p.input.Update(msg)
 		cmds = append(cmds, cmd)
@@ -252,7 +230,7 @@ func (p *Pane) View() string {
 	inputView := p.input.View()
 
 	var status string
-	if p.streaming {
+	if p.engine.Streaming {
 		status = p.spinner.View() + " streaming..."
 	}
 	if p.err != nil {
@@ -274,15 +252,15 @@ func (p *Pane) View() string {
 
 func (p *Pane) updateViewportContent() {
 	var sb strings.Builder
-	for _, m := range p.messages {
+	for _, m := range p.engine.Messages {
 		switch m.Role {
 		case llm.RoleUser:
-			sb.WriteString(userStyle.Render("you") + "\n")
+			sb.WriteString(chatcore.UserStyle.Render("you") + "\n")
 			sb.WriteString(m.Content + "\n\n")
 		case llm.RoleAssistant:
-			sb.WriteString(assistantStyle.Render("rigby") + "\n")
+			sb.WriteString(chatcore.AssistantStyle.Render("rigby") + "\n")
 			content := m.Content
-			if content == "" && p.streaming {
+			if content == "" && p.engine.Streaming {
 				content = "..."
 			}
 			if p.renderer != nil && content != "" {
@@ -298,11 +276,15 @@ func (p *Pane) updateViewportContent() {
 	p.viewport.GotoBottom()
 }
 
-var systemPrompt = `You are Rigby, a helpful assistant running inside rig — a multi-pane terminal UI crafted by Vic. You live in the chat pane alongside scratch, plan, build, git, mcp, models, and servers panes.
+var systemPrompt = `You are Rigby, a helpful assistant running inside rig — a multi-pane terminal UI crafted by Vic.
+
+This is the chat pane — a general-purpose conversation space for questions, brainstorming, debugging help, code discussion, or anything the user wants to talk about. Think of it as the user's go-to for open-ended dialogue.
 
 Keep responses concise and well-formatted in markdown. You can use code blocks, lists, and headings. The user sees your output rendered with glamour in a terminal viewport.
 
-When the user asks about rig itself, you know it is a Go TUI built on Charm's Bubble Tea framework, configured via ~/.rig/config.yaml, and supports multiple LLM providers (OpenAI-compatible, Ollama, Anthropic) and MCP servers.`
+Rig is a Go TUI built on Charm's Bubble Tea framework, configured via ~/.rig/config.yaml, with multiple LLM providers (OpenAI-compatible, Ollama, Anthropic) and MCP servers. The panes are: chat, scratch, plan, build, git, mcp, models, and servers — the user switches between them with tab.
+
+You can see the active plan below for context, but this pane cannot modify it. If the user asks to create, edit, or expand the plan, let them know they should switch to the plan pane (tab to navigate) where a dedicated planning chat can propose and apply changes directly.`
 
 func (p *Pane) buildSystemPrompt() string {
 	prompt := systemPrompt
@@ -312,61 +294,23 @@ func (p *Pane) buildSystemPrompt() string {
 	return prompt
 }
 
-func (p *Pane) startStream() tea.Cmd {
-	msgs := make([]llm.Message, 0, len(p.messages))
-	msgs = append(msgs, llm.Message{Role: llm.RoleSystem, Content: p.buildSystemPrompt()})
-	for i := 0; i < len(p.messages)-1; i++ {
-		msgs = append(msgs, p.messages[i].ToLLM())
-	}
-
-	provider := p.provider
-	model := p.model
-
-	return func() tea.Msg {
-		ctx, cancel := context.WithCancel(context.Background())
-		p.cancel = cancel
-
-		ch, err := provider.StreamChat(ctx, model, msgs)
-		if err != nil {
-			return streamChunkMsg{chunk: llm.StreamChunk{Error: err, Done: true}}
-		}
-		p.streamCh = ch
-		chunk, ok := <-ch
-		if !ok {
-			return streamChunkMsg{chunk: llm.StreamChunk{Done: true}}
-		}
-		return streamChunkMsg{chunk: chunk}
-	}
-}
-
-func (p *Pane) waitForChunk() tea.Cmd {
-	ch := p.streamCh
-	return func() tea.Msg {
-		if ch == nil {
-			return streamChunkMsg{chunk: llm.StreamChunk{Done: true}}
-		}
-		chunk, ok := <-ch
-		if !ok {
-			return streamChunkMsg{chunk: llm.StreamChunk{Done: true}}
-		}
-		return streamChunkMsg{chunk: chunk}
-	}
-}
-
 func (p *Pane) autoSave() {
-	if len(p.messages) == 0 {
+	if len(p.engine.Messages) == 0 {
 		return
 	}
 
-	records := make([]history.MessageRecord, len(p.messages))
-	for i, m := range p.messages {
-		records[i] = m.ToRecord()
+	records := make([]history.MessageRecord, len(p.engine.Messages))
+	for i, m := range p.engine.Messages {
+		records[i] = history.MessageRecord{
+			Role:    string(m.Role),
+			Content: m.Content,
+		}
 	}
 
 	session := history.ChatSession{
 		ID:        p.sessionID,
 		Provider:  p.providerName,
-		Model:     p.model,
+		Model:     p.engine.Model,
 		CreatedAt: p.createdAt,
 		UpdatedAt: time.Now(),
 		Messages:  records,
@@ -376,8 +320,8 @@ func (p *Pane) autoSave() {
 
 func (p *Pane) newSession() {
 	p.autoSave()
-	p.messages = nil
-	p.sessionID = history.GenerateChatID(p.model)
+	p.engine.Messages = nil
+	p.sessionID = history.GenerateChatID(p.engine.Model)
 	p.createdAt = time.Now()
 	p.err = nil
 	p.updateViewportContent()
@@ -402,10 +346,12 @@ func (p *Pane) updatePicker(msg tea.KeyMsg) (pane.Pane, tea.Cmd) {
 	case "up", "k":
 		if p.pickerIdx > 0 {
 			p.pickerIdx--
+			p.scrollPickerToCursor()
 		}
 	case "down", "j":
 		if p.pickerIdx < len(p.pickerItems)-1 {
 			p.pickerIdx++
+			p.scrollPickerToCursor()
 		}
 	case "enter":
 		if len(p.pickerItems) > 0 {
@@ -415,6 +361,16 @@ func (p *Pane) updatePicker(msg tea.KeyMsg) (pane.Pane, tea.Cmd) {
 		}
 	}
 	return p, nil
+}
+
+func (p *Pane) scrollPickerToCursor() {
+	// Each item takes ~3 lines (line + preview + blank)
+	row := p.pickerIdx * 3
+	if row < p.pickerVP.YOffset {
+		p.pickerVP.SetYOffset(row)
+	} else if row >= p.pickerVP.YOffset+p.pickerVP.Height {
+		p.pickerVP.SetYOffset(row - p.pickerVP.Height + 3)
+	}
 }
 
 type chatSessionLoadedMsg struct {
@@ -430,16 +386,12 @@ func (p *Pane) loadSession(id string) tea.Cmd {
 }
 
 func (p *Pane) viewPicker() string {
-	var b strings.Builder
-
-	headerStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#8B5CF6"))
-	b.WriteString(headerStyle.Render("  recent conversations"))
-	b.WriteString("\n\n")
+	var content strings.Builder
 
 	if len(p.pickerItems) == 0 {
 		dim := lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280"))
-		b.WriteString(dim.Render("  no saved conversations"))
-		b.WriteString("\n")
+		content.WriteString(dim.Render("  no saved conversations"))
+		content.WriteString("\n")
 	}
 
 	for i, meta := range p.pickerItems {
@@ -461,12 +413,20 @@ func (p *Pane) viewPicker() string {
 				Render(preview)
 		}
 
-		b.WriteString(line)
-		b.WriteString("\n")
-		b.WriteString(preview)
-		b.WriteString("\n\n")
+		content.WriteString(line)
+		content.WriteString("\n")
+		content.WriteString(preview)
+		content.WriteString("\n\n")
 	}
 
+	p.pickerVP.SetContent(content.String())
+
+	var b strings.Builder
+	headerStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#8B5CF6"))
+	b.WriteString(headerStyle.Render("  recent conversations"))
+	b.WriteString("\n\n")
+	b.WriteString(p.pickerVP.View())
+	b.WriteString("\n")
 	help := lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280"))
 	b.WriteString(help.Render("  ↑/↓ navigate  enter = load  esc = cancel"))
 

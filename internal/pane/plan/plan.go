@@ -1,7 +1,6 @@
 package plan
 
 import (
-	"context"
 	"fmt"
 	"strings"
 	"time"
@@ -12,6 +11,7 @@ import (
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/vicontiveros00/rig/internal/chatcore"
 	"github.com/vicontiveros00/rig/internal/history"
 	"github.com/vicontiveros00/rig/internal/llm"
 	"github.com/vicontiveros00/rig/internal/messages"
@@ -50,13 +50,6 @@ type planLoadedMsg struct {
 	err  error
 }
 
-type planStreamChunkMsg struct{ chunk llm.StreamChunk }
-
-type chatMessage struct {
-	role    llm.Role
-	content string
-}
-
 type pendingToolCall struct {
 	tasks []history.Task
 }
@@ -68,22 +61,16 @@ type Pane struct {
 	width   int
 	height  int
 
-	provider llm.Provider
-	model    string
-
 	view   viewMode
 	mode   editMode
 	input  textinput.Model
 	listVP viewport.Model
 
 	// Chat state
-	chatMsgs    []chatMessage
+	chat        chatcore.Engine
 	chatInput   textarea.Model
 	chatVP      viewport.Model
 	chatSpinner spinner.Model
-	chatStream  bool
-	streamCh    <-chan llm.StreamChunk
-	cancel      context.CancelFunc
 	applied     string
 	pendingTool *pendingToolCall
 
@@ -107,8 +94,7 @@ func New(provider llm.Provider, model string) pane.Pane {
 	sp.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("#7C3AED"))
 
 	p := &Pane{
-		provider:    provider,
-		model:       model,
+		chat:        chatcore.Engine{Provider: provider, Model: model},
 		chatInput:   ta,
 		chatSpinner: sp,
 	}
@@ -199,8 +185,7 @@ func (p *Pane) getTaskSlice(path []int) (*[]history.Task, int) {
 func (p *Pane) Update(msg tea.Msg) (pane.Pane, tea.Cmd) {
 	switch msg := msg.(type) {
 	case messages.ModelSelectedMsg:
-		p.provider = msg.Provider
-		p.model = msg.Model
+		p.chat.SetProvider(msg.Provider, msg.Model)
 		return p, nil
 
 	case planListLoadedMsg:
@@ -212,7 +197,7 @@ func (p *Pane) Update(msg tea.Msg) (pane.Pane, tea.Cmd) {
 	case planLoadedMsg:
 		if msg.err == nil {
 			p.plan = msg.plan
-			p.chatMsgs = nil
+			p.chat.Messages = nil
 			_ = history.SetActivePlan(p.plan.ID)
 			p.rebuildEntries()
 			if p.cursor >= len(p.entries) {
@@ -222,27 +207,17 @@ func (p *Pane) Update(msg tea.Msg) (pane.Pane, tea.Cmd) {
 		}
 		return p, nil
 
-	case planStreamChunkMsg:
-		if msg.chunk.Error != nil {
-			p.chatStream = false
-			p.updateChatViewport()
-			return p, nil
-		}
-		if msg.chunk.Done {
-			p.chatStream = false
-			p.checkForToolBlock()
-			p.updateChatViewport()
-			return p, nil
-		}
-		if len(p.chatMsgs) > 0 {
-			last := &p.chatMsgs[len(p.chatMsgs)-1]
-			last.content += msg.chunk.Content
-		}
+	case chatcore.ChunkMsg:
+		done := p.chat.HandleChunk(msg.Chunk)
 		p.updateChatViewport()
-		return p, p.waitForChunk()
+		if done {
+			p.checkForToolBlock()
+			return p, nil
+		}
+		return p, p.chat.WaitForChunk()
 
 	case spinner.TickMsg:
-		if p.chatStream {
+		if p.chat.Streaming {
 			var cmd tea.Cmd
 			p.chatSpinner, cmd = p.chatSpinner.Update(msg)
 			return p, cmd
@@ -359,12 +334,9 @@ func (p *Pane) updateList(msg tea.KeyMsg) (pane.Pane, tea.Cmd) {
 }
 
 func (p *Pane) updateChat(msg tea.KeyMsg) (pane.Pane, tea.Cmd) {
-	if p.chatStream {
+	if p.chat.Streaming {
 		if msg.String() == "esc" {
-			if p.cancel != nil {
-				p.cancel()
-			}
-			p.chatStream = false
+			p.chat.CancelStream()
 			return p, nil
 		}
 		return p, nil
@@ -401,11 +373,9 @@ func (p *Pane) updateChat(msg tea.KeyMsg) (pane.Pane, tea.Cmd) {
 		}
 		p.chatInput.Reset()
 		p.applied = ""
-		p.chatMsgs = append(p.chatMsgs, chatMessage{role: llm.RoleUser, content: text})
-		p.chatMsgs = append(p.chatMsgs, chatMessage{role: llm.RoleAssistant, content: ""})
-		p.chatStream = true
+		p.chat.SendUser(text)
 		p.updateChatViewport()
-		return p, tea.Batch(p.startChatStream(), p.chatSpinner.Tick)
+		return p, tea.Batch(p.chat.StartStream(p.planSystemPrompt()), p.chatSpinner.Tick)
 	}
 
 	var cmd tea.Cmd
@@ -501,55 +471,8 @@ Keep responses focused on planning — be concise and action-oriented.`, p.plan.
 	return prompt
 }
 
-func (p *Pane) startChatStream() tea.Cmd {
-	msgs := make([]llm.Message, 0, len(p.chatMsgs)+1)
-	msgs = append(msgs, llm.Message{Role: llm.RoleSystem, Content: p.planSystemPrompt()})
-	for i := 0; i < len(p.chatMsgs)-1; i++ {
-		msgs = append(msgs, llm.Message{Role: p.chatMsgs[i].role, Content: p.chatMsgs[i].content})
-	}
-
-	provider := p.provider
-	model := p.model
-
-	return func() tea.Msg {
-		ctx, cancel := context.WithCancel(context.Background())
-		p.cancel = cancel
-
-		ch, err := provider.StreamChat(ctx, model, msgs)
-		if err != nil {
-			return planStreamChunkMsg{chunk: llm.StreamChunk{Error: err, Done: true}}
-		}
-		p.streamCh = ch
-		chunk, ok := <-ch
-		if !ok {
-			return planStreamChunkMsg{chunk: llm.StreamChunk{Done: true}}
-		}
-		return planStreamChunkMsg{chunk: chunk}
-	}
-}
-
-func (p *Pane) waitForChunk() tea.Cmd {
-	ch := p.streamCh
-	return func() tea.Msg {
-		if ch == nil {
-			return planStreamChunkMsg{chunk: llm.StreamChunk{Done: true}}
-		}
-		chunk, ok := <-ch
-		if !ok {
-			return planStreamChunkMsg{chunk: llm.StreamChunk{Done: true}}
-		}
-		return planStreamChunkMsg{chunk: chunk}
-	}
-}
-
 func (p *Pane) checkForToolBlock() {
-	var lastAssistant string
-	for i := len(p.chatMsgs) - 1; i >= 0; i-- {
-		if p.chatMsgs[i].role == llm.RoleAssistant {
-			lastAssistant = p.chatMsgs[i].content
-			break
-		}
-	}
+	lastAssistant := p.chat.LastAssistantContent()
 
 	block := ExtractToolBlock(lastAssistant)
 	if block == "" {
@@ -664,7 +587,7 @@ func (p *Pane) newPlanCmd() tea.Cmd {
 	p.autoSave()
 	p.plan = newPlan("untitled plan")
 	p.cursor = 0
-	p.chatMsgs = nil
+	p.chat.Messages = nil
 	p.rebuildEntries()
 	p.mode = editPlanTitle
 	p.input = textinput.New()
@@ -805,7 +728,7 @@ func (p *Pane) viewChat() string {
 	b.WriteString(p.chatVP.View())
 	b.WriteString("\n")
 
-	if p.chatStream {
+	if p.chat.Streaming {
 		b.WriteString(p.chatSpinner.View() + " streaming...\n")
 	}
 	if p.applied != "" {
@@ -827,19 +750,16 @@ func (p *Pane) viewChat() string {
 }
 
 func (p *Pane) updateChatViewport() {
-	userStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#7C3AED"))
-	assistantStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#10B981"))
-
 	var sb strings.Builder
-	for _, m := range p.chatMsgs {
-		switch m.role {
+	for _, m := range p.chat.Messages {
+		switch m.Role {
 		case llm.RoleUser:
-			sb.WriteString(userStyle.Render("you") + "\n")
-			sb.WriteString(m.content + "\n\n")
+			sb.WriteString(chatcore.UserStyle.Render("you") + "\n")
+			sb.WriteString(m.Content + "\n\n")
 		case llm.RoleAssistant:
-			sb.WriteString(assistantStyle.Render("rigby") + "\n")
-			content := m.content
-			if content == "" && p.chatStream {
+			sb.WriteString(chatcore.AssistantStyle.Render("rigby") + "\n")
+			content := m.Content
+			if content == "" && p.chat.Streaming {
 				content = "..."
 			}
 			content = renderToolBlocks(content)
