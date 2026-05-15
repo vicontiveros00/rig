@@ -10,19 +10,21 @@ import (
 )
 
 type Model struct {
-	panes     []pane.Pane
-	activeIdx int
-	width     int
-	height    int
-	model     string
-	provider  string
+	panes       []pane.Pane
+	activeIdx   int
+	width       int
+	height      int
+	model       string
+	provider    string
+	projectName string
 }
 
-func New(panes []pane.Pane, provider, model string) Model {
+func New(panes []pane.Pane, provider, model, projectName string) Model {
 	return Model{
-		panes:    panes,
-		model:    model,
-		provider: provider,
+		panes:       panes,
+		model:       model,
+		provider:    provider,
+		projectName: projectName,
 	}
 }
 
@@ -95,10 +97,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	active := m.panes[m.activeIdx]
-	updated, cmd := active.Update(msg)
-	m.panes[m.activeIdx] = updated
-	return m, cmd
+	var cmds []tea.Cmd
+	for i, p := range m.panes {
+		updated, cmd := p.Update(msg)
+		m.panes[i] = updated
+		if cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+	}
+	return m, tea.Batch(cmds...)
 }
 
 func (m Model) View() string {
@@ -112,7 +119,7 @@ func (m Model) View() string {
 	}
 
 	tabBar := ui.RenderTabs(names, m.activeIdx, m.width)
-	statusBar := ui.RenderStatusBar(m.model, m.provider, m.width)
+	statusBar := ui.RenderStatusBar(m.model, m.provider, m.projectName, m.width)
 
 	tabH := lipgloss.Height(tabBar)
 	statusH := lipgloss.Height(statusBar)

@@ -7,7 +7,14 @@ import (
 	"github.com/vicontiveros00/rig/internal/version"
 )
 
-func RenderStatusBar(model, provider string, width int) string {
+func RenderStatusBar(model, provider, projectName string, width int) string {
+	var projectIndicator string
+	if projectName != "" {
+		projectIndicator = lipgloss.NewStyle().Foreground(Fg).Render(projectName)
+	} else {
+		projectIndicator = lipgloss.NewStyle().Foreground(lipgloss.Color("#EF4444")).Render("no repo")
+	}
+
 	left := fmt.Sprintf("%s %s  %s/%s",
 		HelpKey.Render("rig"),
 		Subtle.Render(version.String()),
@@ -15,7 +22,8 @@ func RenderStatusBar(model, provider string, width int) string {
 		lipgloss.NewStyle().Foreground(Fg).Render(model),
 	)
 
-	right := fmt.Sprintf("%s %s  %s %s",
+	right := fmt.Sprintf("%s  %s %s  %s %s",
+		projectIndicator,
 		HelpKey.Render("tab/shift+tab"),
 		HelpDesc.Render("switch tab"),
 		HelpKey.Render("ctrl+c"),

@@ -309,8 +309,11 @@ func (s *Servers) initForm(mode formMode) {
 		if mode == formEditProvider {
 			pcfg := s.cfg.Providers[s.editTarget]
 			s.inputs[0].SetValue(s.editTarget)
+			s.inputs[0].CursorEnd()
 			s.inputs[1].SetValue(pcfg.Endpoint)
+			s.inputs[1].CursorEnd()
 			s.inputs[2].SetValue(pcfg.APIKey)
+			s.inputs[2].CursorEnd()
 		}
 
 	case formAddMCP, formEditMCP:
@@ -328,9 +331,13 @@ func (s *Servers) initForm(mode formMode) {
 		if mode == formEditMCP {
 			mcfg := s.cfg.MCPServers[s.editTarget]
 			s.inputs[0].SetValue(s.editTarget)
+			s.inputs[0].CursorEnd()
 			s.inputs[1].SetValue(mcfg.Endpoint)
+			s.inputs[1].CursorEnd()
 			s.inputs[2].SetValue(mcfg.APIKey)
+			s.inputs[2].CursorEnd()
 			s.inputs[3].SetValue(mcfg.Transport)
+			s.inputs[3].CursorEnd()
 		}
 	}
 	s.focusIdx = 0

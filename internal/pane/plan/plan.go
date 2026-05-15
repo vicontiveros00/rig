@@ -2,6 +2,7 @@ package plan
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -10,12 +11,14 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/vicontiveros00/rig/internal/chatcore"
 	"github.com/vicontiveros00/rig/internal/history"
 	"github.com/vicontiveros00/rig/internal/llm"
 	"github.com/vicontiveros00/rig/internal/messages"
 	"github.com/vicontiveros00/rig/internal/pane"
+	"github.com/vicontiveros00/rig/internal/project"
 )
 
 type viewMode int
@@ -51,7 +54,9 @@ type planLoadedMsg struct {
 }
 
 type pendingToolCall struct {
+	kind  string // "apply_plan" or "read_file"
 	tasks []history.Task
+	file  string
 }
 
 type Pane struct {
@@ -71,6 +76,7 @@ type Pane struct {
 	chatInput   textarea.Model
 	chatVP      viewport.Model
 	chatSpinner spinner.Model
+	renderer    *glamour.TermRenderer
 	applied     string
 	pendingTool *pendingToolCall
 
@@ -80,6 +86,9 @@ type Pane struct {
 
 	confirmDelete bool
 	nextTaskID    int
+
+	projectRoot string
+	projectTree string
 }
 
 func New(provider llm.Provider, model string) pane.Pane {
@@ -93,10 +102,24 @@ func New(provider llm.Provider, model string) pane.Pane {
 	sp.Spinner = spinner.Dot
 	sp.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("#7C3AED"))
 
+	root, hasProject := project.DetectRoot()
+	var tree string
+	if hasProject {
+		tree = project.Tree(root, 4)
+	}
+
+	r, _ := glamour.NewTermRenderer(
+		glamour.WithStylePath("dark"),
+		glamour.WithWordWrap(80),
+	)
+
 	p := &Pane{
 		chat:        chatcore.Engine{Provider: provider, Model: model},
 		chatInput:   ta,
 		chatSpinner: sp,
+		renderer:    r,
+		projectRoot: root,
+		projectTree: tree,
 	}
 	if id, _ := history.GetActivePlan(); id != "" {
 		if loaded, err := history.LoadPlan(id); err == nil {
@@ -144,6 +167,15 @@ func (p *Pane) SetSize(w, h int) {
 	}
 	p.chatVP.Width = w
 	p.chatVP.Height = vpH
+
+	wrapWidth := w - 4
+	if wrapWidth < 40 {
+		wrapWidth = 40
+	}
+	p.renderer, _ = glamour.NewTermRenderer(
+		glamour.WithStylePath("dark"),
+		glamour.WithWordWrap(wrapWidth),
+	)
 }
 
 func (p *Pane) Init() tea.Cmd {
@@ -212,16 +244,18 @@ func (p *Pane) Update(msg tea.Msg) (pane.Pane, tea.Cmd) {
 		p.updateChatViewport()
 		if done {
 			p.checkForToolBlock()
+			if p.pendingTool == nil {
+				p.chatInput.Focus()
+				return p, textarea.Blink
+			}
 			return p, nil
 		}
 		return p, p.chat.WaitForChunk()
 
 	case spinner.TickMsg:
-		if p.chat.Streaming {
-			var cmd tea.Cmd
-			p.chatSpinner, cmd = p.chatSpinner.Update(msg)
-			return p, cmd
-		}
+		var cmd tea.Cmd
+		p.chatSpinner, cmd = p.chatSpinner.Update(msg)
+		return p, cmd
 
 	case tea.KeyMsg:
 		if p.pickerOpen {
@@ -323,6 +357,7 @@ func (p *Pane) updateList(msg tea.KeyMsg) (pane.Pane, tea.Cmd) {
 		p.chatInput.Focus()
 		p.applied = ""
 		p.updateChatViewport()
+		return p, textarea.Blink
 	case "ctrl+n":
 		return p, p.newPlanCmd()
 	case "ctrl+o":
@@ -378,9 +413,13 @@ func (p *Pane) updateChat(msg tea.KeyMsg) (pane.Pane, tea.Cmd) {
 		return p, tea.Batch(p.chat.StartStream(p.planSystemPrompt()), p.chatSpinner.Tick)
 	}
 
+	var cmds []tea.Cmd
 	var cmd tea.Cmd
 	p.chatInput, cmd = p.chatInput.Update(msg)
-	return p, cmd
+	cmds = append(cmds, cmd)
+	p.chatVP, cmd = p.chatVP.Update(msg)
+	cmds = append(cmds, cmd)
+	return p, tea.Batch(cmds...)
 }
 
 func (p *Pane) updateEdit(msg tea.KeyMsg) (pane.Pane, tea.Cmd) {
@@ -453,38 +492,62 @@ func (p *Pane) updateConfirmDelete(msg tea.KeyMsg) (pane.Pane, tea.Cmd) {
 
 func (p *Pane) planSystemPrompt() string {
 	tasksMD := formatPlanMarkdown(p.plan.Tasks, 0)
-	prompt := fmt.Sprintf(`You are Rigby, a planning assistant inside rig. You are in the plan pane helping the user work on their plan.
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf(`You are Rigby, a planning assistant inside rig.
+
+IMPORTANT: You are NOT in the chat pane. You are in the PLAN PANE — a dedicated space for creating and managing task plans. Your sole purpose here is to help the user build, expand, and refine their plan. Do not describe yourself as being in the chat pane. If the user asks what they can do here, explain that this is the plan chat where they can ask you to create tasks, break down work, and propose plan changes using the apply_plan tool.
 
 ## Current Plan: %q
 
 %s
-When the user asks you to create, expand, or modify tasks, propose changes using a tool block:
+You have access to the following tools:
 
 <tool:apply_plan>
 - [ ] task title
   - [ ] subtask
   notes: optional notes
 </tool:apply_plan>
+Propose plan changes that the user can approve.
+`, p.plan.Title, tasksMD))
 
-This will prompt the user to confirm before applying. You can include explanatory text before and after the tool block. Use the same markdown task format as the current plan shown above.
-Keep responses focused on planning — be concise and action-oriented.`, p.plan.Title, tasksMD)
-	return prompt
+	if p.projectTree != "" {
+		sb.WriteString(`
+<tool:read_file>path/to/file</tool:read_file>
+Request to read a file from the project to inform your planning.
+`)
+	}
+
+	sb.WriteString(`
+The user will approve each tool call. Only use one tool per response.
+Keep responses focused on planning — be concise and action-oriented.
+`)
+
+	if p.projectTree != "" {
+		sb.WriteString(fmt.Sprintf("\n## Project Layout\n```\n%s```\n", p.projectTree))
+	}
+
+	return sb.String()
 }
 
 func (p *Pane) checkForToolBlock() {
 	lastAssistant := p.chat.LastAssistantContent()
 
-	block := ExtractToolBlock(lastAssistant)
-	if block == "" {
+	tc := ExtractPlanToolCall(lastAssistant)
+	if tc == nil {
 		return
 	}
 
-	tasks := ParsePlanMarkdown(block)
-	if len(tasks) == 0 {
-		return
+	switch tc.kind {
+	case "apply_plan":
+		tasks := ParsePlanMarkdown(tc.content)
+		if len(tasks) == 0 {
+			return
+		}
+		p.pendingTool = &pendingToolCall{kind: "apply_plan", tasks: tasks}
+	case "read_file":
+		p.pendingTool = &pendingToolCall{kind: "read_file", file: tc.content}
 	}
-
-	p.pendingTool = &pendingToolCall{tasks: tasks}
 }
 
 func (p *Pane) applyPendingTool() tea.Cmd {
@@ -492,17 +555,46 @@ func (p *Pane) applyPendingTool() tea.Cmd {
 		return nil
 	}
 
-	tasks := p.pendingTool.tasks
-	if len(p.plan.Tasks) == 0 {
-		p.plan.Tasks = tasks
-	} else {
-		p.plan.Tasks = append(p.plan.Tasks, tasks...)
+	switch p.pendingTool.kind {
+	case "apply_plan":
+		tasks := p.pendingTool.tasks
+		if len(p.plan.Tasks) == 0 {
+			p.plan.Tasks = tasks
+		} else {
+			p.plan.Tasks = append(p.plan.Tasks, tasks...)
+		}
+		p.pendingTool = nil
+		p.rebuildEntries()
+		p.applied = fmt.Sprintf("applied %d tasks", len(tasks))
+		p.updateChatViewport()
+		return p.autoSave()
+
+	case "read_file":
+		filePath := p.pendingTool.file
+		p.pendingTool = nil
+
+		fullPath := filepath.Join(p.projectRoot, filePath)
+		content, err := project.ReadFile(fullPath)
+		if err != nil {
+			content = fmt.Sprintf("Error reading file: %s", err)
+		}
+
+		result := fmt.Sprintf("File: %s\n\n%s", filePath, content)
+		p.chat.Messages = append(p.chat.Messages, chatcore.Message{
+			Role:    llm.RoleUser,
+			Content: result,
+		})
+		p.chat.Messages = append(p.chat.Messages, chatcore.Message{
+			Role:    llm.RoleAssistant,
+			Content: "",
+		})
+		p.chat.Streaming = true
+		p.updateChatViewport()
+		return tea.Batch(p.chat.StartStream(p.planSystemPrompt()), p.chatSpinner.Tick)
 	}
+
 	p.pendingTool = nil
-	p.rebuildEntries()
-	p.applied = fmt.Sprintf("applied %d tasks", len(tasks))
-	p.updateChatViewport()
-	return p.autoSave()
+	return nil
 }
 
 // --- Task operations ---
@@ -762,37 +854,30 @@ func (p *Pane) updateChatViewport() {
 			if content == "" && p.chat.Streaming {
 				content = "..."
 			}
-			content = renderToolBlocks(content)
-			sb.WriteString(content + "\n\n")
+			content = StripPlanToolBlocks(content)
+			if p.renderer != nil && content != "" {
+				rendered, err := p.renderer.Render(content)
+				if err == nil {
+					content = rendered
+				}
+			}
+			sb.WriteString(content + "\n")
 		}
 	}
 
 	if p.pendingTool != nil {
-		sb.WriteString(p.renderToolCard(p.pendingTool.tasks))
+		switch p.pendingTool.kind {
+		case "apply_plan":
+			sb.WriteString(p.renderToolCard(p.pendingTool.tasks))
+		case "read_file":
+			sb.WriteString(p.renderReadFileCard(p.pendingTool.file))
+		}
 	}
 
 	p.chatVP.SetContent(sb.String())
 	p.chatVP.GotoBottom()
 }
 
-func renderToolBlocks(content string) string {
-	const open = "<tool:apply_plan>"
-	const close = "</tool:apply_plan>"
-	result := content
-	for {
-		start := strings.Index(result, open)
-		if start == -1 {
-			break
-		}
-		endTag := strings.Index(result[start:], close)
-		if endTag == -1 {
-			break
-		}
-		end := start + endTag + len(close)
-		result = result[:start] + result[end:]
-	}
-	return result
-}
 
 func (p *Pane) renderToolCard(tasks []history.Task) string {
 	border := lipgloss.NewStyle().
@@ -813,6 +898,28 @@ func (p *Pane) renderToolCard(tasks []history.Task) string {
 	sb.WriteString("\n")
 	hint := lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280"))
 	sb.WriteString(hint.Render("y = apply    n = skip"))
+
+	return "  " + border.Render(sb.String()) + "\n"
+}
+
+func (p *Pane) renderReadFileCard(path string) string {
+	border := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("#F59E0B")).
+		Padding(0, 1).
+		Width(p.width - 6)
+
+	var sb strings.Builder
+	header := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#F59E0B"))
+	sb.WriteString(header.Render("read file?"))
+	sb.WriteString("\n\n")
+
+	pathStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#E5E7EB")).Bold(true)
+	sb.WriteString("  " + pathStyle.Render(path))
+	sb.WriteString("\n\n")
+
+	hint := lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280"))
+	sb.WriteString(hint.Render("y = approve    n = skip"))
 
 	return "  " + border.Render(sb.String()) + "\n"
 }

@@ -88,20 +88,62 @@ func ParsePlanMarkdown(input string) []history.Task {
 	return root
 }
 
-func ExtractToolBlock(content string) string {
-	const open = "<tool:apply_plan>"
-	const close = "</tool:apply_plan>"
+type planToolCall struct {
+	kind    string // "apply_plan" or "read_file"
+	content string
+}
 
-	start := strings.LastIndex(content, open)
-	if start == -1 {
-		return ""
+func ExtractPlanToolCall(content string) *planToolCall {
+	tools := []string{"apply_plan", "read_file"}
+	for _, name := range tools {
+		open := "<tool:" + name + ">"
+		close := "</tool:" + name + ">"
+		start := strings.LastIndex(content, open)
+		if start == -1 {
+			continue
+		}
+		bodyStart := start + len(open)
+		endIdx := strings.Index(content[bodyStart:], close)
+		if endIdx == -1 {
+			continue
+		}
+		return &planToolCall{
+			kind:    name,
+			content: strings.TrimSpace(content[bodyStart : bodyStart+endIdx]),
+		}
 	}
-	bodyStart := start + len(open)
-	endIdx := strings.Index(content[bodyStart:], close)
-	if endIdx == -1 {
-		return ""
+	return nil
+}
+
+func StripPlanToolBlocks(content string) string {
+	tools := []string{"apply_plan", "read_file"}
+	result := content
+	for _, name := range tools {
+		open := "<tool:" + name + ">"
+		close := "</tool:" + name + ">"
+		for {
+			start := strings.Index(result, open)
+			if start == -1 {
+				break
+			}
+			endTag := strings.Index(result[start:], close)
+			if endTag == -1 {
+				break
+			}
+			end := start + endTag + len(close)
+			result = result[:start] + result[end:]
+		}
 	}
-	return strings.TrimSpace(content[bodyStart : bodyStart+endIdx])
+	return result
+}
+
+// ExtractToolBlock is kept for backwards compatibility
+func ExtractToolBlock(content string) string {
+	tc := ExtractPlanToolCall(content)
+	if tc != nil && tc.kind == "apply_plan" {
+		return tc.content
+	}
+	return ""
 }
 
 func ExtractLastPlanBlock(content string) string {
