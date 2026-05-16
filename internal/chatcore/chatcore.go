@@ -2,6 +2,7 @@ package chatcore
 
 import (
 	"context"
+	"fmt"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -29,12 +30,14 @@ type Message struct {
 }
 
 type Engine struct {
-	Provider  llm.Provider
-	Model     string
-	Messages  []Message
-	Streaming bool
-	streamCh  <-chan llm.StreamChunk
-	cancel    context.CancelFunc
+	Provider     llm.Provider
+	Model        string
+	Messages     []Message
+	Streaming    bool
+	PromptTokens int
+	TotalTokens  int
+	streamCh     <-chan llm.StreamChunk
+	cancel       context.CancelFunc
 }
 
 func (e *Engine) SetProvider(p llm.Provider, model string) {
@@ -48,6 +51,11 @@ func (e *Engine) SendUser(text string) {
 	e.Streaming = true
 }
 
+type StreamReadyMsg struct {
+	Ch  <-chan llm.StreamChunk
+	Err error
+}
+
 func (e *Engine) StartStream(systemPrompt string) tea.Cmd {
 	msgs := make([]llm.Message, 0, len(e.Messages)+1)
 	msgs = append(msgs, llm.Message{Role: llm.RoleSystem, Content: systemPrompt})
@@ -58,21 +66,23 @@ func (e *Engine) StartStream(systemPrompt string) tea.Cmd {
 	provider := e.Provider
 	model := e.Model
 
-	return func() tea.Msg {
-		ctx, cancel := context.WithCancel(context.Background())
-		e.cancel = cancel
+	ctx, cancel := context.WithCancel(context.Background())
+	e.cancel = cancel
 
+	return func() tea.Msg {
 		ch, err := provider.StreamChat(ctx, model, msgs)
-		if err != nil {
-			return ChunkMsg{Chunk: llm.StreamChunk{Error: err, Done: true}}
-		}
-		e.streamCh = ch
-		chunk, ok := <-ch
-		if !ok {
-			return ChunkMsg{Chunk: llm.StreamChunk{Done: true}}
-		}
-		return ChunkMsg{Chunk: chunk}
+		return StreamReadyMsg{Ch: ch, Err: err}
 	}
+}
+
+// HandleReady processes a StreamReadyMsg. Call this when you receive one.
+func (e *Engine) HandleReady(msg StreamReadyMsg) (tea.Cmd, error) {
+	if msg.Err != nil {
+		e.Streaming = false
+		return nil, msg.Err
+	}
+	e.streamCh = msg.Ch
+	return e.WaitForChunk(), nil
 }
 
 func (e *Engine) WaitForChunk() tea.Cmd {
@@ -98,6 +108,18 @@ func (e *Engine) HandleChunk(chunk llm.StreamChunk) bool {
 	}
 	if chunk.Done {
 		e.Streaming = false
+		if chunk.PromptTokens > 0 {
+			e.PromptTokens = chunk.PromptTokens
+		}
+		if chunk.TotalTokens > 0 {
+			e.TotalTokens = chunk.TotalTokens
+		}
+		if len(e.Messages) > 0 {
+			last := &e.Messages[len(e.Messages)-1]
+			if last.Role == llm.RoleAssistant && strings.TrimSpace(last.Content) == "" {
+				last.Content = "(no response from model)"
+			}
+		}
 		return true
 	}
 	if len(e.Messages) > 0 {
@@ -121,6 +143,27 @@ func (e *Engine) LastAssistantContent() string {
 		}
 	}
 	return ""
+}
+
+// ContextStatus returns a formatted string showing token usage from API data only.
+func ContextStatus(e *Engine) string {
+	style := lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280"))
+
+	if e.TotalTokens == 0 {
+		return style.Render("tokens: waiting for response")
+	}
+
+	return style.Render(fmt.Sprintf("%s tokens used", formatTokenCount(e.TotalTokens)))
+}
+
+func formatTokenCount(n int) string {
+	if n >= 1000000 {
+		return fmt.Sprintf("%.1fm", float64(n)/1000000)
+	}
+	if n >= 1000 {
+		return fmt.Sprintf("%.1fk", float64(n)/1000)
+	}
+	return fmt.Sprintf("%d", n)
 }
 
 func (e *Engine) RenderMessages() string {

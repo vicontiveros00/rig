@@ -239,6 +239,15 @@ func (p *Pane) Update(msg tea.Msg) (pane.Pane, tea.Cmd) {
 		}
 		return p, nil
 
+	case chatcore.StreamReadyMsg:
+		cmd, err := p.chat.HandleReady(msg)
+		if err != nil {
+			p.updateChatViewport()
+			p.chatInput.Focus()
+			return p, textarea.Blink
+		}
+		return p, cmd
+
 	case chatcore.ChunkMsg:
 		done := p.chat.HandleChunk(msg.Chunk)
 		p.updateChatViewport()
@@ -821,7 +830,11 @@ func (p *Pane) viewChat() string {
 	b.WriteString("\n")
 
 	if p.chat.Streaming {
-		b.WriteString(p.chatSpinner.View() + " streaming...\n")
+		label := " streaming..."
+		if last := p.chat.LastAssistantContent(); last == "" {
+			label = " waiting for model..."
+		}
+		b.WriteString(p.chatSpinner.View() + label + "\n")
 	}
 	if p.applied != "" {
 		applyStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#10B981"))
@@ -832,10 +845,11 @@ func (p *Pane) viewChat() string {
 	b.WriteString("\n")
 
 	help := lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280"))
+	ctx := chatcore.ContextStatus(&p.chat)
 	if p.pendingTool != nil {
-		b.WriteString(help.Render("  y=apply  n=skip"))
+		b.WriteString(help.Render("  y=apply  n=skip") + "  " + ctx)
 	} else {
-		b.WriteString(help.Render("  enter=send  esc=back"))
+		b.WriteString(help.Render("  enter=send  esc=back") + "  " + ctx)
 	}
 
 	return b.String()

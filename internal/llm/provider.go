@@ -20,9 +20,11 @@ type Message struct {
 }
 
 type StreamChunk struct {
-	Content string
-	Done    bool
-	Error   error
+	Content      string
+	Done         bool
+	Error        error
+	PromptTokens int
+	TotalTokens  int
 }
 
 type Provider interface {

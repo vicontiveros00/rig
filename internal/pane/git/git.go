@@ -19,8 +19,15 @@ const (
 	viewStatus gitView = iota
 	viewDiff
 	viewLog
+	viewBranches
 	viewClone
 )
+
+type branchEntry struct {
+	name    string
+	remote  bool
+	current bool
+}
 
 type fileEntry struct {
 	path   string
@@ -43,6 +50,10 @@ type diffLoadedMsg struct {
 
 type logLoadedMsg struct {
 	content string
+}
+
+type branchesLoadedMsg struct {
+	branches []branchEntry
 }
 
 type gitActionDoneMsg struct {
@@ -70,6 +81,10 @@ type Pane struct {
 
 	commitMode  bool
 	commitInput textinput.Model
+
+	branches    []branchEntry
+	branchVP    viewport.Model
+	branchIdx   int
 
 	cloneInput textinput.Model
 	actionMsg  string
@@ -107,6 +122,8 @@ func (p *Pane) SetSize(w, h int) {
 	p.diffVP.Height = vpH
 	p.logVP.Width = w
 	p.logVP.Height = vpH
+	p.branchVP.Width = w
+	p.branchVP.Height = vpH
 	p.commitInput.Width = w - 20
 	p.cloneInput.Width = w - 10
 }
@@ -142,6 +159,13 @@ func (p *Pane) Update(msg tea.Msg) (pane.Pane, tea.Cmd) {
 		p.logVP.GotoTop()
 		return p, nil
 
+	case branchesLoadedMsg:
+		p.branches = msg.branches
+		p.branchIdx = 0
+		p.view = viewBranches
+		p.updateBranchViewport()
+		return p, nil
+
 	case gitActionDoneMsg:
 		if msg.err != nil {
 			p.actionMsg = msg.err.Error()
@@ -160,6 +184,8 @@ func (p *Pane) Update(msg tea.Msg) (pane.Pane, tea.Cmd) {
 			return p.updateDiff(msg)
 		case viewLog:
 			return p.updateLog(msg)
+		case viewBranches:
+			return p.updateBranches(msg)
 		default:
 			if p.commitMode {
 				return p.updateCommit(msg)
@@ -176,10 +202,14 @@ func (p *Pane) updateStatus(msg tea.KeyMsg) (pane.Pane, tea.Cmd) {
 	case "up", "k":
 		if p.cursor > 0 {
 			p.cursor--
+			p.updateStatusViewport()
+			p.scrollStatusToCursor()
 		}
 	case "down", "j":
 		if p.cursor < len(p.files)-1 {
 			p.cursor++
+			p.updateStatusViewport()
+			p.scrollStatusToCursor()
 		}
 	case "enter":
 		if len(p.files) > 0 {
@@ -207,8 +237,16 @@ func (p *Pane) updateStatus(msg tea.KeyMsg) (pane.Pane, tea.Cmd) {
 		return p, p.gitCmdAsync("push")
 	case "P":
 		return p, p.gitCmdAsync("pull")
+	case "s":
+		return p, p.gitCmdAsync("stash")
+	case "S":
+		return p, p.gitCmdAsync("stash", "pop")
 	case "l":
 		return p, p.loadLog()
+	case "b":
+		return p, p.loadBranches()
+	case "f":
+		return p, p.gitCmdAsync("fetch", "--all")
 	case "r":
 		return p, p.refreshStatus()
 	}
@@ -262,6 +300,42 @@ func (p *Pane) updateLog(msg tea.KeyMsg) (pane.Pane, tea.Cmd) {
 	return p, cmd
 }
 
+func (p *Pane) updateBranches(msg tea.KeyMsg) (pane.Pane, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		p.view = viewStatus
+		return p, nil
+	case "up", "k":
+		if p.branchIdx > 0 {
+			p.branchIdx--
+			p.updateBranchViewport()
+		}
+	case "down", "j":
+		if p.branchIdx < len(p.branches)-1 {
+			p.branchIdx++
+			p.updateBranchViewport()
+		}
+	case "enter":
+		if p.branchIdx < len(p.branches) {
+			br := p.branches[p.branchIdx]
+			if !br.current {
+				name := br.name
+				if br.remote {
+					parts := strings.SplitN(name, "/", 2)
+					if len(parts) == 2 {
+						name = parts[1]
+					}
+				}
+				return p, p.gitCmdAsync("checkout", name)
+			}
+		}
+	}
+
+	var cmd tea.Cmd
+	p.branchVP, cmd = p.branchVP.Update(msg)
+	return p, cmd
+}
+
 func (p *Pane) updateClone(msg tea.KeyMsg) (pane.Pane, tea.Cmd) {
 	switch msg.String() {
 	case "enter":
@@ -292,6 +366,8 @@ func (p *Pane) View() string {
 		return p.viewDiffPane()
 	case viewLog:
 		return p.viewLogPane()
+	case viewBranches:
+		return p.viewBranchesPane()
 	default:
 		return p.viewStatusPane()
 	}
@@ -315,15 +391,6 @@ func (p *Pane) viewStatusPane() string {
 	b.WriteString(headerStyle.Render(fmt.Sprintf("  git: %s", branchInfo)))
 	b.WriteString("\n")
 
-	if p.actionMsg != "" {
-		style := lipgloss.NewStyle().Foreground(lipgloss.Color("#10B981"))
-		if p.actionErr {
-			style = lipgloss.NewStyle().Foreground(lipgloss.Color("#EF4444"))
-		}
-		b.WriteString(style.Render("  " + truncate(p.actionMsg, p.width-4)))
-		b.WriteString("\n")
-	}
-
 	b.WriteString(p.statusVP.View())
 	b.WriteString("\n")
 
@@ -336,7 +403,7 @@ func (p *Pane) viewStatusPane() string {
 	if p.commitMode {
 		b.WriteString(help.Render("  enter=commit  esc=cancel"))
 	} else {
-		b.WriteString(help.Render("  enter=diff  a=stage  u=unstage  A=all  c=commit  p=push  P=pull  l=log  r=refresh"))
+		b.WriteString(help.Render("  enter=diff  a=stage  u=unstage  A=all  c=commit  p=push  P=pull  s=stash  S=pop  f=fetch  b=branches  l=log"))
 	}
 
 	return b.String()
@@ -364,6 +431,82 @@ func (p *Pane) viewLogPane() string {
 	help := lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280"))
 	b.WriteString(help.Render("  ↑/↓=scroll  esc=back"))
 	return b.String()
+}
+
+func (p *Pane) viewBranchesPane() string {
+	var b strings.Builder
+	headerStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#8B5CF6"))
+	b.WriteString(headerStyle.Render("  branches"))
+	b.WriteString("\n")
+	b.WriteString(p.branchVP.View())
+	b.WriteString("\n")
+	help := lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280"))
+	b.WriteString(help.Render("  ↑/↓=navigate  enter=checkout  esc=back"))
+	return b.String()
+}
+
+func (p *Pane) updateBranchViewport() {
+	localStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#10B981"))
+	remoteStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#3B82F6"))
+	currentStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#F59E0B")).Bold(true)
+
+	var content strings.Builder
+
+	hasLocal := false
+	for _, br := range p.branches {
+		if !br.remote {
+			hasLocal = true
+			break
+		}
+	}
+	if hasLocal {
+		content.WriteString(lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#E5E7EB")).Render("  local:"))
+		content.WriteString("\n")
+	}
+
+	idx := 0
+	for i, br := range p.branches {
+		if br.remote {
+			continue
+		}
+		var line string
+		if br.current {
+			line = fmt.Sprintf("  * %s", currentStyle.Render(br.name))
+		} else {
+			line = fmt.Sprintf("    %s", localStyle.Render(br.name))
+		}
+		if i == p.branchIdx {
+			line = lipgloss.NewStyle().Background(lipgloss.Color("#1E1B4B")).Width(p.width - 2).Render(line)
+		}
+		content.WriteString(line + "\n")
+		idx++
+	}
+
+	hasRemote := false
+	for _, br := range p.branches {
+		if br.remote {
+			hasRemote = true
+			break
+		}
+	}
+	if hasRemote {
+		content.WriteString("\n")
+		content.WriteString(lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#E5E7EB")).Render("  remote:"))
+		content.WriteString("\n")
+	}
+
+	for i, br := range p.branches {
+		if !br.remote {
+			continue
+		}
+		line := fmt.Sprintf("    %s", remoteStyle.Render(br.name))
+		if i == p.branchIdx {
+			line = lipgloss.NewStyle().Background(lipgloss.Color("#1E1B4B")).Width(p.width - 2).Render(line)
+		}
+		content.WriteString(line + "\n")
+	}
+
+	p.branchVP.SetContent(content.String())
 }
 
 func (p *Pane) viewClone() string {
@@ -397,6 +540,16 @@ func (p *Pane) viewClone() string {
 
 func (p *Pane) updateStatusViewport() {
 	var content strings.Builder
+
+	if p.actionMsg != "" {
+		style := lipgloss.NewStyle().Foreground(lipgloss.Color("#10B981"))
+		if p.actionErr {
+			style = lipgloss.NewStyle().Foreground(lipgloss.Color("#EF4444"))
+		}
+		content.WriteString(style.Render(formatActionMsg(p.actionMsg, p.actionErr)))
+		content.WriteString("\n\n")
+	}
+
 	stagedStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#10B981"))
 	unstagedStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#EF4444"))
 	untrackedStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280"))
@@ -553,6 +706,35 @@ func (p *Pane) loadLog() tea.Cmd {
 	}
 }
 
+func (p *Pane) loadBranches() tea.Cmd {
+	return func() tea.Msg {
+		var branches []branchEntry
+
+		// Local branches
+		out, _ := exec.Command("git", "branch", "--format=%(refname:short) %(HEAD)").Output()
+		for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+			if line == "" {
+				continue
+			}
+			parts := strings.Fields(line)
+			name := parts[0]
+			current := len(parts) > 1 && parts[1] == "*"
+			branches = append(branches, branchEntry{name: name, current: current})
+		}
+
+		// Remote branches
+		out, _ = exec.Command("git", "branch", "-r", "--format=%(refname:short)").Output()
+		for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+			if line == "" || strings.Contains(line, "HEAD") {
+				continue
+			}
+			branches = append(branches, branchEntry{name: line, remote: true})
+		}
+
+		return branchesLoadedMsg{branches: branches}
+	}
+}
+
 func (p *Pane) gitCmd(args ...string) tea.Cmd {
 	return func() tea.Msg {
 		out, err := exec.Command("git", args...).CombinedOutput()
@@ -597,12 +779,87 @@ func colorizeDiff(diff string) string {
 	return sb.String()
 }
 
-func truncate(s string, max int) string {
-	if nl := strings.IndexByte(s, '\n'); nl >= 0 {
-		s = s[:nl]
+func (p *Pane) scrollStatusToCursor() {
+	// Estimate the line offset: action msg takes ~2 lines, each section header ~2 lines
+	// Each file entry is 1 line. This is approximate but good enough.
+	lineOffset := 0
+	if p.actionMsg != "" {
+		lineOffset += 2
 	}
-	if len(s) > max {
-		return s[:max-3] + "..."
+
+	staged, unstaged, untracked := 0, 0, 0
+	for _, f := range p.files {
+		if f.status == "?" {
+			untracked++
+		} else if f.staged {
+			staged++
+		} else {
+			unstaged++
+		}
 	}
-	return s
+
+	idx := p.cursor
+	if staged > 0 {
+		lineOffset++ // "staged:" header
+		if idx < staged {
+			lineOffset += idx
+		} else {
+			lineOffset += staged + 1 // all staged + blank line
+			idx -= staged
+		}
+	}
+	if unstaged > 0 && idx >= 0 {
+		lineOffset++ // "unstaged:" header
+		if idx < unstaged {
+			lineOffset += idx
+		} else {
+			lineOffset += unstaged + 1
+			idx -= unstaged
+		}
+	}
+	if untracked > 0 && idx >= 0 {
+		lineOffset++ // "untracked:" header
+		lineOffset += idx
+	}
+
+	if lineOffset < p.statusVP.YOffset {
+		p.statusVP.SetYOffset(lineOffset)
+	} else if lineOffset >= p.statusVP.YOffset+p.statusVP.Height {
+		p.statusVP.SetYOffset(lineOffset - p.statusVP.Height + 1)
+	}
+}
+
+func formatActionMsg(msg string, isErr bool) string {
+	if !isErr {
+		if nl := strings.IndexByte(msg, '\n'); nl >= 0 {
+			msg = msg[:nl]
+		}
+		return "  " + msg
+	}
+
+	lower := strings.ToLower(msg)
+
+	switch {
+	case strings.Contains(lower, "would be overwritten by merge"):
+		return "  pull failed: local changes conflict. press s to stash, then P to pull, then S to pop"
+	case strings.Contains(lower, "not a git repository"):
+		return "  not a git repository"
+	case strings.Contains(lower, "nothing to commit"):
+		return "  nothing to commit — working tree clean"
+	case strings.Contains(lower, "rejected") && strings.Contains(lower, "push"):
+		return "  push rejected: remote has changes. pull first (P), then push (p)"
+	case strings.Contains(lower, "conflict"):
+		return "  merge conflict detected — resolve conflicts, stage files (a), then commit (c)"
+	case strings.Contains(lower, "permission denied") || strings.Contains(lower, "authentication"):
+		return "  authentication failed — check your credentials or SSH key"
+	default:
+		first := msg
+		if nl := strings.IndexByte(first, '\n'); nl >= 0 {
+			first = first[:nl]
+		}
+		if len(first) > 80 {
+			first = first[:77] + "..."
+		}
+		return "  " + first
+	}
 }

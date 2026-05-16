@@ -145,6 +145,11 @@ func ListChats() ([]ChatMeta, error) {
 	return metas, nil
 }
 
+func DeleteChat(id string) error {
+	path := filepath.Join(chatDir(), id+".json")
+	return os.Remove(path)
+}
+
 func LoadChat(id string) (ChatSession, error) {
 	path := filepath.Join(chatDir(), id+".json")
 	data, err := os.ReadFile(path)

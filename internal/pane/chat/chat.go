@@ -47,7 +47,8 @@ type Pane struct {
 	pickerOpen  bool
 	pickerItems []history.ChatMeta
 	pickerIdx   int
-	pickerVP    viewport.Model
+	pickerVP            viewport.Model
+	pickerConfirmDelete bool
 }
 
 func New(provider llm.Provider, model string) pane.Pane {
@@ -188,6 +189,15 @@ func (p *Pane) Update(msg tea.Msg) (pane.Pane, tea.Cmd) {
 			return p, tea.Batch(p.engine.StartStream(p.buildSystemPrompt()), p.spinner.Tick)
 		}
 
+	case chatcore.StreamReadyMsg:
+		cmd, err := p.engine.HandleReady(msg)
+		if err != nil {
+			p.err = err
+			p.updateViewportContent()
+			return p, nil
+		}
+		return p, cmd
+
 	case chatcore.ChunkMsg:
 		done := p.engine.HandleChunk(msg.Chunk)
 		if msg.Chunk.Error != nil {
@@ -201,11 +211,9 @@ func (p *Pane) Update(msg tea.Msg) (pane.Pane, tea.Cmd) {
 		return p, p.engine.WaitForChunk()
 
 	case spinner.TickMsg:
-		if p.engine.Streaming {
-			var cmd tea.Cmd
-			p.spinner, cmd = p.spinner.Update(msg)
-			cmds = append(cmds, cmd)
-		}
+		var cmd tea.Cmd
+		p.spinner, cmd = p.spinner.Update(msg)
+		cmds = append(cmds, cmd)
 	}
 
 	if !p.engine.Streaming && !p.pickerOpen {
@@ -231,13 +239,22 @@ func (p *Pane) View() string {
 
 	var status string
 	if p.engine.Streaming {
-		status = p.spinner.View() + " streaming..."
+		last := ""
+		if len(p.engine.Messages) > 0 {
+			last = p.engine.Messages[len(p.engine.Messages)-1].Content
+		}
+		if last == "" {
+			status = p.spinner.View() + " waiting for model..."
+		} else {
+			status = p.spinner.View() + " streaming..."
+		}
 	}
 	if p.err != nil {
 		status = errStyle.Render(fmt.Sprintf("error: %v", p.err))
 	}
 
-	help := hintStyle.Render("ctrl+n new chat  ctrl+o history")
+	ctx := chatcore.ContextStatus(&p.engine)
+	help := hintStyle.Render("ctrl+n new  ctrl+o history") + "  " + ctx
 
 	var parts []string
 	parts = append(parts, vpView)
@@ -276,15 +293,13 @@ func (p *Pane) updateViewportContent() {
 	p.viewport.GotoBottom()
 }
 
-var systemPrompt = `You are Rigby, a helpful assistant running inside rig — a multi-pane terminal UI crafted by Vic.
+var systemPrompt = `You are Rigby, a friendly and versatile assistant running inside rig — a terminal UI crafted by Vic.
 
-This is the chat pane — a general-purpose conversation space for questions, brainstorming, debugging help, code discussion, or anything the user wants to talk about. Think of it as the user's go-to for open-ended dialogue.
+This is the chat pane — your space to talk about anything. The user might ask about code, work through a problem, chat about their day, ask general knowledge questions, test how you handle different topics, or just have a conversation. Be natural, helpful, and adapt to whatever they bring up.
 
-Keep responses concise and well-formatted in markdown. You can use code blocks, lists, and headings. The user sees your output rendered with glamour in a terminal viewport.
+Keep responses concise and well-formatted in markdown when it helps (code blocks, lists, headings), but don't over-format casual conversation. The output is rendered in a terminal viewport.
 
-Rig is a Go TUI built on Charm's Bubble Tea framework, configured via ~/.rig/config.yaml, with multiple LLM providers (OpenAI-compatible, Ollama, Anthropic) and MCP servers. The panes are: chat, scratch, plan, build, git, mcp, models, and servers — the user switches between them with tab.
-
-You can see the active plan below for context, but this pane cannot modify it. If the user asks to create, edit, or expand the plan, let them know they should switch to the plan pane (tab to navigate) where a dedicated planning chat can propose and apply changes directly.`
+You have awareness of the user's active plan (if one exists) for context, but plan modifications happen in the plan pane — if they ask to edit the plan, point them there (tab to switch panes).`
 
 func (p *Pane) buildSystemPrompt() string {
 	prompt := systemPrompt
@@ -339,6 +354,23 @@ type chatListLoadedMsg struct {
 }
 
 func (p *Pane) updatePicker(msg tea.KeyMsg) (pane.Pane, tea.Cmd) {
+	if p.pickerConfirmDelete {
+		switch msg.String() {
+		case "y":
+			if p.pickerIdx < len(p.pickerItems) {
+				_ = history.DeleteChat(p.pickerItems[p.pickerIdx].ID)
+				p.pickerItems = append(p.pickerItems[:p.pickerIdx], p.pickerItems[p.pickerIdx+1:]...)
+				if p.pickerIdx >= len(p.pickerItems) && p.pickerIdx > 0 {
+					p.pickerIdx--
+				}
+			}
+			p.pickerConfirmDelete = false
+		case "n", "esc":
+			p.pickerConfirmDelete = false
+		}
+		return p, nil
+	}
+
 	switch msg.String() {
 	case "esc":
 		p.pickerOpen = false
@@ -358,6 +390,10 @@ func (p *Pane) updatePicker(msg tea.KeyMsg) (pane.Pane, tea.Cmd) {
 			meta := p.pickerItems[p.pickerIdx]
 			p.pickerOpen = false
 			return p, p.loadSession(meta.ID)
+		}
+	case "d":
+		if len(p.pickerItems) > 0 {
+			p.pickerConfirmDelete = true
 		}
 	}
 	return p, nil
@@ -419,6 +455,16 @@ func (p *Pane) viewPicker() string {
 		content.WriteString("\n\n")
 	}
 
+	if p.pickerConfirmDelete && p.pickerIdx < len(p.pickerItems) {
+		warn := lipgloss.NewStyle().Foreground(lipgloss.Color("#EF4444")).Bold(true)
+		preview := p.pickerItems[p.pickerIdx].Preview
+		if len(preview) > 40 {
+			preview = preview[:37] + "..."
+		}
+		content.WriteString(warn.Render(fmt.Sprintf("  delete %q? (y/n)", preview)))
+		content.WriteString("\n")
+	}
+
 	p.pickerVP.SetContent(content.String())
 
 	var b strings.Builder
@@ -428,7 +474,11 @@ func (p *Pane) viewPicker() string {
 	b.WriteString(p.pickerVP.View())
 	b.WriteString("\n")
 	help := lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280"))
-	b.WriteString(help.Render("  ↑/↓ navigate  enter = load  esc = cancel"))
+	if p.pickerConfirmDelete {
+		b.WriteString(help.Render("  y = delete  n = cancel"))
+	} else {
+		b.WriteString(help.Render("  ↑/↓ navigate  enter = load  d = delete  esc = cancel"))
+	}
 
 	return b.String()
 }

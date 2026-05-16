@@ -36,9 +36,10 @@ func (o *OpenAIProvider) StreamChat(ctx context.Context, model string, msgs []Me
 	}
 
 	stream, err := o.client.CreateChatCompletionStream(ctx, openai.ChatCompletionRequest{
-		Model:    model,
-		Messages: oaiMsgs,
-		Stream:   true,
+		Model:         model,
+		Messages:      oaiMsgs,
+		Stream:        true,
+		StreamOptions: &openai.StreamOptions{IncludeUsage: true},
 	})
 	if err != nil {
 		return nil, err
@@ -48,15 +49,20 @@ func (o *OpenAIProvider) StreamChat(ctx context.Context, model string, msgs []Me
 	go func() {
 		defer close(ch)
 		defer stream.Close()
+		var promptTokens, totalTokens int
 		for {
 			resp, err := stream.Recv()
 			if errors.Is(err, io.EOF) {
-				ch <- StreamChunk{Done: true}
+				ch <- StreamChunk{Done: true, PromptTokens: promptTokens, TotalTokens: totalTokens}
 				return
 			}
 			if err != nil {
 				ch <- StreamChunk{Error: err, Done: true}
 				return
+			}
+			if resp.Usage != nil {
+				promptTokens = resp.Usage.PromptTokens
+				totalTokens = resp.Usage.TotalTokens
 			}
 			if len(resp.Choices) > 0 {
 				ch <- StreamChunk{Content: resp.Choices[0].Delta.Content}

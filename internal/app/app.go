@@ -95,8 +95,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.activeIdx = (m.activeIdx - 1 + len(m.panes)) % len(m.panes)
 			return m, nil
 		}
+		// Key events only go to the active pane
+		active := m.panes[m.activeIdx]
+		updated, cmd := active.Update(msg)
+		m.panes[m.activeIdx] = updated
+		return m, cmd
 	}
 
+	// All other messages broadcast to every pane
 	var cmds []tea.Cmd
 	for i, p := range m.panes {
 		updated, cmd := p.Update(msg)

@@ -135,6 +135,10 @@ func (c *Config) LoadModelsCache() {
 }
 
 func (c *Config) SaveConfig() error {
+	if len(c.Providers) == 0 && c.DefaultProvider != "" {
+		return fmt.Errorf("refusing to save config: providers map is empty (would lose all provider data)")
+	}
+
 	out := struct {
 		DefaultProvider string                     `yaml:"default_provider"`
 		DefaultModel    string                     `yaml:"default_model"`

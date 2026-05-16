@@ -98,6 +98,7 @@ type Pane struct {
 func New(provider llm.Provider, model string) pane.Pane {
 	ci := textinput.New()
 	ci.Placeholder = "command (e.g. go build ./...)"
+	ci.Prompt = "$ "
 	ci.Focus()
 
 	ai := textarea.New()
@@ -183,6 +184,15 @@ func (p *Pane) Update(msg tea.Msg) (pane.Pane, tea.Cmd) {
 		}
 		return p, nil
 
+	case chatcore.StreamReadyMsg:
+		cmd, err := p.agent.HandleReady(msg)
+		if err != nil {
+			p.agentState = agentWaiting
+			p.updateAgentViewport()
+			return p, nil
+		}
+		return p, cmd
+
 	case chatcore.ChunkMsg:
 		done := p.agent.HandleChunk(msg.Chunk)
 		p.updateAgentViewport()
@@ -193,11 +203,9 @@ func (p *Pane) Update(msg tea.Msg) (pane.Pane, tea.Cmd) {
 		return p, p.agent.WaitForChunk()
 
 	case spinner.TickMsg:
-		if p.agent.Streaming || p.cmdRunning {
-			var cmd tea.Cmd
-			p.agentSpin, cmd = p.agentSpin.Update(msg)
-			return p, cmd
-		}
+		var cmd tea.Cmd
+		p.agentSpin, cmd = p.agentSpin.Update(msg)
+		return p, cmd
 
 	case tea.KeyMsg:
 		if p.mode == modeAgent {
@@ -561,8 +569,12 @@ func (p *Pane) viewManual() string {
 	headerStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#8B5CF6"))
 	b.WriteString(headerStyle.Render("  build"))
 	if p.activePlanTitle != "" {
+		title := p.activePlanTitle
+		if len(title) > 40 {
+			title = title[:37] + "..."
+		}
 		dim := lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280"))
-		b.WriteString(dim.Render(fmt.Sprintf("  plan: %s", p.activePlanTitle)))
+		b.WriteString(dim.Render(fmt.Sprintf("  plan: %s", title)))
 	}
 	b.WriteString("\n")
 
@@ -574,7 +586,7 @@ func (p *Pane) viewManual() string {
 		b.WriteString("\n")
 	}
 
-	b.WriteString(fmt.Sprintf("  > %s", p.cmdInput.View()))
+	b.WriteString(fmt.Sprintf("  %s", p.cmdInput.View()))
 	b.WriteString("\n")
 
 	help := lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280"))
@@ -589,8 +601,12 @@ func (p *Pane) viewAgent() string {
 	headerStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#8B5CF6"))
 	b.WriteString(headerStyle.Render("  build agent"))
 	if p.activePlanTitle != "" {
+		title := p.activePlanTitle
+		if len(title) > 40 {
+			title = title[:37] + "..."
+		}
 		dim := lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280"))
-		b.WriteString(dim.Render(fmt.Sprintf("  plan: %s", p.activePlanTitle)))
+		b.WriteString(dim.Render(fmt.Sprintf("  plan: %s", title)))
 	}
 	b.WriteString("\n")
 
@@ -598,7 +614,11 @@ func (p *Pane) viewAgent() string {
 	b.WriteString("\n")
 
 	if p.agent.Streaming {
-		b.WriteString(p.agentSpin.View() + " thinking...\n")
+		label := " thinking..."
+		if last := p.agent.LastAssistantContent(); last == "" {
+			label = " waiting for model..."
+		}
+		b.WriteString(p.agentSpin.View() + label + "\n")
 	} else if p.cmdRunning {
 		b.WriteString(p.agentSpin.View() + " running command...\n")
 	}
@@ -625,10 +645,11 @@ func (p *Pane) viewAgent() string {
 	}
 
 	help := lipgloss.NewStyle().Foreground(lipgloss.Color("#6B7280"))
+	ctx := chatcore.ContextStatus(&p.agent)
 	if p.agentState == agentPending {
-		b.WriteString(help.Render("  y=approve  n=skip"))
+		b.WriteString(help.Render("  y=approve  n=skip") + "  " + ctx)
 	} else {
-		b.WriteString(help.Render("  enter=send  esc=manual mode"))
+		b.WriteString(help.Render("  enter=send  esc=manual mode") + "  " + ctx)
 	}
 
 	return b.String()
