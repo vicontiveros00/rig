@@ -1,6 +1,6 @@
 # rig
 
-Your final AI interface. A multi-pane terminal UI for managing LLMs, MCP servers, git, builds, and more — all from one command.
+Your final AI interface. A multi-pane terminal UI for chatting with LLMs, planning tasks, running agentic builds, managing git repos, browsing MCP tools, and switching models — all from one command.
 
 ## Install
 
@@ -16,6 +16,8 @@ cd rig
 make install
 ```
 
+Make sure `~/go/bin` is in your `$PATH`.
+
 ## Usage
 
 ```bash
@@ -24,17 +26,73 @@ rig --provider ollama        # override provider
 rig --model gpt-4o-mini      # override model
 ```
 
+Launch rig from any project directory — it auto-detects the project root and provides file tree context to Rigby.
+
+## Panes
+
+| Pane | Description |
+|---|---|
+| **Chat** | General-purpose conversation with Rigby. Markdown rendering, conversation history (ctrl+o), auto-save. |
+| **Scratch** | Persistent notepad with history. Save (ctrl+s), new (ctrl+n), browse past scratches (ctrl+o). |
+| **Plan** | Task planning with add/edit/delete/indent, status toggling. Built-in plan chat — Rigby proposes tasks via tool calls, you approve with y/n. Active plan provides context to chat and build panes. |
+| **Build** | Manual command runner + agentic mode. Rigby runs commands (run_cmd), reads files (read_file), and iterates until done — each action requires your approval. Command history persists. |
+| **Git** | Repo status, colored diffs, stage/unstage, commit, push, pull, fetch, stash, branch switching. Clone prompt when no repo detected. |
+| **MCP** | Connect to MCP servers, browse tools and resources, invoke tools with JSON args, view results. Supports Streamable HTTP (SSE) transport. |
+| **Models** | Auto-discover models from all providers, filter, switch the active model on the fly. |
+| **Servers** | Add/edit/remove model providers and MCP servers, health checks, start/stop local servers. |
+
 ### Navigation
 
 | Key | Action |
 |---|---|
-| `Tab` | Next tab |
-| `Shift+Tab` | Previous tab |
-| `Enter` | Send message (in Chat) |
-| `Alt+Enter` | Newline in input |
-| `Esc` | Cancel streaming |
-| `Ctrl+S` | Save (in Scratch) |
+| `Tab` / `Shift+Tab` | Switch panes |
 | `Ctrl+C` | Quit |
+
+### Chat / Plan chat / Build agent
+
+| Key | Action |
+|---|---|
+| `Enter` | Send message |
+| `Alt+Enter` | Newline in input |
+| `Esc` | Cancel streaming / back to list |
+| `Ctrl+N` | New session |
+| `Ctrl+O` | Browse history |
+
+### Plan (list mode)
+
+| Key | Action |
+|---|---|
+| `a` | Add task |
+| `e` | Edit task title |
+| `Space` | Cycle status (pending → in progress → done) |
+| `d` | Delete task |
+| `n` | Edit notes |
+| `c` | Open plan chat with Rigby |
+| `Tab` / `Shift+Tab` | Indent / unindent task |
+
+### Build (manual mode)
+
+| Key | Action |
+|---|---|
+| `Enter` | Run command |
+| `Ctrl+C` | Kill running command |
+| `Ctrl+L` | Clear output |
+| `↑` / `↓` | Command history |
+| `c` | Switch to agent mode |
+
+### Git
+
+| Key | Action |
+|---|---|
+| `Enter` | View diff |
+| `a` / `u` | Stage / unstage file |
+| `A` | Stage all |
+| `c` | Commit (inline message) |
+| `p` / `P` | Push / pull |
+| `s` / `S` | Stash / stash pop |
+| `f` | Fetch all |
+| `b` | Browse branches |
+| `l` | View log |
 
 ## Configuration
 
@@ -60,66 +118,62 @@ providers:
 
 API keys can also be set via environment variables: `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`.
 
+Providers and MCP servers can be managed directly from the **servers** pane — no need to edit YAML by hand.
+
+## Data storage
+
+| Path | Contents |
+|---|---|
+| `~/.rig/config.yaml` | Provider and MCP server configuration |
+| `~/.rig/history/chat/` | Saved chat conversations (JSON) |
+| `~/.rig/history/scratch/` | Archived scratch notes (Markdown) |
+| `~/.rig/history/plan/` | Saved plans with tasks (JSON) |
+| `~/.rig/active_plan` | ID of the currently active plan |
+| `~/.rig/build_history` | Recent build commands |
+| `~/.rig/models_cache.yaml` | Discovered models cache |
+
 ## Architecture
 
-rig is built with the [Charm](https://charm.sh) stack for Go:
+Built with the [Charm](https://charm.sh) stack for Go:
 
-| Layer | Library | Role |
-|---|---|---|
-| TUI framework | [Bubble Tea](https://github.com/charmbracelet/bubbletea) | Elm-architecture event loop |
-| Styling | [Lip Gloss](https://github.com/charmbracelet/lipgloss) | Terminal CSS |
-| Components | [Bubbles](https://github.com/charmbracelet/bubbles) | Text input, viewport, spinner |
-| Markdown | [Glamour](https://github.com/charmbracelet/glamour) | Render markdown in terminal |
-| Config | [Viper](https://github.com/spf13/viper) | YAML config with env overrides |
-
-The root `App` model owns all pane models and delegates `Update`/`View` to the active pane. Each pane implements a common `Pane` interface so the app treats them uniformly. LLM providers implement a `Provider` interface with streaming support, making it straightforward to add new backends.
+| Layer | Library |
+|---|---|
+| TUI framework | [Bubble Tea](https://github.com/charmbracelet/bubbletea) |
+| Styling | [Lip Gloss](https://github.com/charmbracelet/lipgloss) |
+| Components | [Bubbles](https://github.com/charmbracelet/bubbles) |
+| Markdown | [Glamour](https://github.com/charmbracelet/glamour) |
+| Config | [Viper](https://github.com/spf13/viper) |
+| LLM | [go-openai](https://github.com/sashabaranov/go-openai) |
 
 ### Project structure
 
 ```
 rig/
-├── cmd/rig/main.go                 # entry point, flags, wiring
+├── cmd/rig/                    # entry point, flags, wiring
 ├── internal/
-│   ├── app/                        # root Bubble Tea model, pane routing, keybindings
-│   ├── pane/                       # Pane interface + all pane implementations
-│   │   ├── chat/                   # LLM chat with streaming + markdown rendering
-│   │   ├── scratch/                # persistent notepad (saves to ~/.rig/scratch.md)
-│   │   ├── plan/                   # structured task planning (stub)
-│   │   ├── build/                  # run builds and commands (stub)
-│   │   ├── git/                    # git operations (stub)
-│   │   ├── mcp/                    # MCP server management (stub)
-│   │   ├── models/                 # model browser (stub)
-│   │   └── servers/                # server management (stub)
-│   ├── llm/                        # Provider interface, OpenAI + Ollama backends
-│   ├── config/                     # Viper-based config (~/.rig/config.yaml)
-│   └── ui/                         # shared styles, tab bar, status bar
+│   ├── app/                    # root model, pane routing, keybindings
+│   ├── chatcore/               # shared chat engine (streaming, messages, token tracking)
+│   ├── config/                 # Viper config + MCP server config
+│   ├── history/                # persistence for chats, scratches, plans
+│   ├── llm/                    # Provider interface, OpenAI + Ollama backends
+│   ├── mcp/                    # MCP JSON-RPC client (SSE transport)
+│   ├── project/                # project root detection, file tree, file reading
+│   ├── pane/
+│   │   ├── chat/               # general chat with Rigby
+│   │   ├── scratch/            # persistent notepad with history
+│   │   ├── plan/               # task planning + plan chat + tool-call apply
+│   │   ├── build/              # command runner + agentic build agent
+│   │   ├── git/                # git status, diff, commit, branches, stash
+│   │   ├── mcp/                # MCP tool/resource browser
+│   │   ├── models/             # model discovery and switching
+│   │   └── servers/            # provider and MCP server management
+│   ├── ui/                     # shared styles, tab bar, status bar
+│   └── version/                # build-time version injection
+├── specs/                      # design specs for each feature
 ├── go.mod
-├── Makefile                        # build, run, install, clean
+├── Makefile
 └── README.md
 ```
-
-## Panes
-
-| Pane | Status | Description |
-|---|---|---|
-| **Chat** | Working | Send prompts and stream responses from any LLM. Markdown rendering, cancel with Esc. |
-| **Scratch** | Working | Persistent notepad. Saves to `~/.rig/scratch.md` with `Ctrl+S`. Will support session tagging. |
-| **Plan** | Stub | Structured task planning. |
-| **Build** | Stub | Run builds and commands, see output. |
-| **Git** | Stub | Status, diff, commit, push. |
-| **MCP** | Stub | Connect to and manage MCP servers. |
-| **Models** | Stub | Browse and switch between local and cloud models. |
-| **Servers** | Stub | Launch, monitor, and kill local servers (LLM, MCP, etc.). |
-
-## LLM Providers
-
-rig supports any OpenAI-compatible API out of the box:
-
-- **OpenAI** — GPT-4o, GPT-4o-mini, etc.
-- **Ollama** — any local model via the OpenAI-compatible endpoint at `localhost:11434/v1`
-- **Any OpenAI-compatible server** — set a custom endpoint in config
-
-Streaming is handled via a `Provider` interface with a channel-based `StreamChat` method, so adding new providers (Anthropic, Groq, local vLLM, etc.) is a matter of implementing the interface.
 
 ## Development
 
