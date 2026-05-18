@@ -182,7 +182,18 @@ make build          # compile to bin/rig
 make run            # go run
 make install        # go install to $GOPATH/bin
 make clean          # remove bin/
+go test ./...       # run all tests
 ```
+
+### Testing
+
+Tests cover pure logic packages — config parsing, history persistence, MCP SSE parsing, project tree generation, and tool block extraction. Run with:
+
+```bash
+go test ./...
+```
+
+CI runs automatically on every push to main and on pull requests via GitHub Actions.
 
 ## License
 
