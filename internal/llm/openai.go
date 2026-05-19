@@ -65,7 +65,11 @@ func (o *OpenAIProvider) StreamChat(ctx context.Context, model string, msgs []Me
 				totalTokens = resp.Usage.TotalTokens
 			}
 			if len(resp.Choices) > 0 {
-				ch <- StreamChunk{Content: resp.Choices[0].Delta.Content}
+				delta := resp.Choices[0].Delta
+				ch <- StreamChunk{
+					Content:   delta.Content,
+					Reasoning: delta.ReasoningContent,
+				}
 			}
 		}
 	}()
