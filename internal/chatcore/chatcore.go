@@ -55,8 +55,12 @@ type Engine struct {
 	Streaming    bool
 	PromptTokens int
 	TotalTokens  int
-	streamCh     <-chan llm.StreamChunk
-	cancel       context.CancelFunc
+	// Reasoning is the accumulated reasoning/thinking content from the most
+	// recent assistant turn, kept separate from the visible message content.
+	// Reset at the start of each new user message via SendUser.
+	Reasoning string
+	streamCh  <-chan llm.StreamChunk
+	cancel    context.CancelFunc
 }
 
 func (e *Engine) SetProvider(p llm.Provider, model string) {
@@ -67,6 +71,7 @@ func (e *Engine) SetProvider(p llm.Provider, model string) {
 func (e *Engine) SendUser(text string) {
 	e.Messages = append(e.Messages, Message{Role: llm.RoleUser, Content: text})
 	e.Messages = append(e.Messages, Message{Role: llm.RoleAssistant, Content: ""})
+	e.Reasoning = ""
 	e.Streaming = true
 }
 
@@ -141,7 +146,10 @@ func (e *Engine) HandleChunk(chunk llm.StreamChunk) bool {
 		}
 		return true
 	}
-	if len(e.Messages) > 0 {
+	if chunk.Reasoning != "" {
+		e.Reasoning += chunk.Reasoning
+	}
+	if chunk.Content != "" && len(e.Messages) > 0 {
 		last := &e.Messages[len(e.Messages)-1]
 		last.Content += chunk.Content
 	}

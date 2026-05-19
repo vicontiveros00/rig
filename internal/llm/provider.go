@@ -21,6 +21,7 @@ type Message struct {
 
 type StreamChunk struct {
 	Content      string
+	Reasoning    string // separate stream of reasoning/thinking tokens (e.g. DeepSeek R1, Claude extended thinking)
 	Done         bool
 	Error        error
 	PromptTokens int
