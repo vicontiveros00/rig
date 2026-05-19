@@ -20,6 +20,25 @@ var (
 			Foreground(lipgloss.Color("#10B981"))
 )
 
+// PanesOverview is a factual description of every pane in rig, included
+// in chat-enabled pane system prompts so Rigby doesn't hallucinate
+// capabilities. Keep this in sync with the actual implemented panes.
+const PanesOverview = `# Panes in rig
+
+The user navigates between panes with tab / shift+tab. These are the panes that actually exist:
+
+- **chat** — general-purpose conversation. No tool calls, no command execution. Just talking.
+- **scratch** — a persistent notepad. The user types notes, saves with ctrl+s, archives with ctrl+n, browses past scratches with ctrl+o.
+- **plan** — task planning. Tasks have status (pending / in progress / done), can be nested, and can have notes. The plan pane has its own embedded chat where Rigby can propose plan changes via an apply_plan tool block that the user approves with y/n.
+- **build** — has two modes: a manual command runner (type a shell command, see streaming output) and an agent mode where Rigby can run shell commands, read files, and iterate. Tool calls require user approval.
+- **git** — repo operations: status, diff, stage/unstage, commit, push, pull, fetch, stash, branch list and checkout. Shows a clone prompt when not in a repo.
+- **mcp** — browse and invoke MCP server tools and read their resources. Configured MCP servers are connected automatically.
+- **models** — auto-discover models from configured providers and switch the active model.
+- **servers** — add, edit, remove model providers and MCP servers, run health checks, start/stop local servers.
+
+rig does NOT have: web search, image generation, file editing, code execution outside the build pane, voice, or any other capabilities not listed above. If asked about a feature you're unsure about, say it isn't part of rig rather than guessing.`
+
+
 type ChunkMsg struct {
 	Chunk llm.StreamChunk
 }

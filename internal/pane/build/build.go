@@ -484,7 +484,11 @@ You have access to the following tools:
 The user will approve each tool call before it executes. After each command, you'll see the stdout/stderr output and exit code. Analyze the results and decide the next step.
 
 Be concise. Explain what you're doing in 1-2 sentences before each tool call. Only use one tool per response.
+
 `)
+
+	sb.WriteString(chatcore.PanesOverview)
+	sb.WriteString("\n")
 
 	if p.projectTree != "" {
 		sb.WriteString(fmt.Sprintf("\n## Project Layout\n```\n%s```\n", p.projectTree))

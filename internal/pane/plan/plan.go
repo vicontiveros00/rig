@@ -530,7 +530,11 @@ Request to read a file from the project to inform your planning.
 	sb.WriteString(`
 The user will approve each tool call. Only use one tool per response.
 Keep responses focused on planning — be concise and action-oriented.
+
 `)
+
+	sb.WriteString(chatcore.PanesOverview)
+	sb.WriteString("\n")
 
 	if p.projectTree != "" {
 		sb.WriteString(fmt.Sprintf("\n## Project Layout\n```\n%s```\n", p.projectTree))
